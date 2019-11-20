@@ -1,9 +1,15 @@
 /*
 1. Create Table for holding tblBucket info
 2. Create Database Snapshot
-3. DBCC CHECKALLOC
-4. DBCC CHECKCATALOG
+3. DBCC CHECKALLOC on all databases
+4. DBCC CHECKCATALOG on all databases
 5. DBCC CHECKTABLE on each table
+
+Need to add:
+Make sure CheckTable continues to run on same database
+Add option for manual snapshots
+Add Calculations for length of time to run and logic to then pick tables that will fit in that time frame
+
 */
 SET NOCOUNT ON
 GO
