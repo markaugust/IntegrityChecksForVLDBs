@@ -8,7 +8,8 @@
 Need to add:
 Make sure CheckTable continues to run on same database (done)
 Add option for manual snapshots
-Add Calculations for length of time to run and logic to then pick tables that will fit in that time frame
+Add Calculations for length of time to run and logic to then pick tables that will fit in that time frame (done)
+Add Calculations for average pages/sec (optional, maybe not needed)
 
 */
 SET NOCOUNT ON
@@ -16,10 +17,11 @@ GO
 use master
 go
 
-DECLARE @TimeLimit int = 20 --in seconds, currently only for CheckTable
-DECLARE @dbname sysname, @dbid int, @sqlcmd nvarchar(max)
+DECLARE @TimeLimit int = NULL --in seconds, currently only for CheckTable
+
 DECLARE @JobStartTime datetime = GETDATE()
-DECLARE @tablename sysname, @schemaname sysname
+DECLARE @JobEndTime datetime = DATEADD(SS, @TimeLimit, @JobStartTime)
+DECLARE @dbname sysname, @dbid int, @tablename sysname, @schemaname sysname, @sqlcmd nvarchar(max)
 
 --DROP TABLE dbo.tblObjects
 
@@ -58,7 +60,12 @@ DECLARE @tblObj TABLE (
     [type_desc] NVARCHAR(60),
     [used_page_count] bigint
 )
-
+DECLARE @checkTableDbOrder TABLE (
+    [name] sysname,
+    [dbid] int,
+    [MinStartTime] datetime,
+    [isDone] bit
+)
 
 --Get names of databases and track for loop
 --This is where you would adjust what databases you want to check
@@ -67,20 +74,22 @@ SELECT name, database_id, 0 as isdone
 FROM sys.databases
 WHERE is_read_only = 0 --only databases that are READ_WRITE
 AND state = 0 --only databases that are ONLINE
---AND database_id <> 2 --exclude tempdb
+AND database_id <> 2 --exclude tempdb
 AND name IN ('StackOverflow2010','AdventureWorks2017') --for testing
 
 --loop through all databases gathered and get page count for each table in the database
-WHILE (SELECT COUNT(name) FROM @tblDBs WHERE isdone = 0) > 0
+WHILE 1=1
 BEGIN
-    SET @dbname = ''
-    SET @dbid = 0
-    SET @sqlcmd = ''
+    SELECT TOP 1 @dbname = name, @dbid = dbid FROM @tblDBs WHERE isdone = 0
+    IF @@ROWCOUNT = 0
+    BEGIN
+        BREAK
+    END
 
-    SELECT TOP 1 @dbname = name, @dbid = dbid from @tblDBs where isdone = 0
-
+    --This query is derived and taken from the MS Tiger Scripts
     --This is where you would adjust what tables you want to select
-    SET @sqlcmd = 'SELECT ''' + @dbname + ''' as database_name, ' + CAST(@dbid as varchar) + ' as dbid, so.[object_id], so.[name], ss.name, so.[type], so.type_desc, SUM(sps.used_page_count) AS used_page_count
+    SET @sqlcmd = 'SELECT ''' + @dbname + ''' as database_name, ' + CAST(@dbid as varchar) + ' as dbid,
+    so.[object_id], so.[name], ss.name, so.[type], so.type_desc, SUM(sps.used_page_count) AS used_page_count
     FROM [' + @dbname + '].sys.objects so
     INNER JOIN [' + @dbname + '].sys.dm_db_partition_stats sps ON so.[object_id] = sps.[object_id]
     INNER JOIN [' + @dbname + '].sys.indexes si ON so.[object_id] = si.[object_id]
@@ -88,18 +97,14 @@ BEGIN
     WHERE so.[type] IN (''S'', ''U'', ''V'')
     GROUP BY so.[object_id], so.[name], ss.name, so.[type], so.type_desc'
 
-    insert into @tblObj
-    exec sp_executesql @sqlcmd
-    --print @sqlcmd
+    INSERT INTO @tblObj
+    EXEC sp_executesql @sqlcmd
 
     --update loop counter
     UPDATE @tblDBs
     SET isdone = 1
-    where name = @dbname
+    WHERE name = @dbname
 END
-
---select *
---from @tblObj
 
 --Merge into persistent table
 --Match on database name, schema name, and table name
@@ -132,10 +137,6 @@ WHEN NOT MATCHED BY SOURCE THEN
     DELETE
 ;
 
---select *
---from tblObjects
-
-
 ----------RUN CHECKALLOC AND CHECKCATALOG------------------------
 
 --For Testing Only--------------
@@ -153,27 +154,23 @@ UPDATE @tblDBs
 SET isdone = 0
 
 --loop through all databases in @tblDBs and run CheckAlloc and CheckCatalog
-WHILE (GETDATE() < DATEADD(SS, @TimeLimit, @JobStartTime) OR @TimeLimit IS NULL) --(SELECT COUNT(name) from @tblDBs where isdone = 0) > 0
+WHILE (GETDATE() < @JobEndTime OR @TimeLimit IS NULL)
 BEGIN
-    SET @dbname = ''
-    SET @dbid = 0
-    SET @sqlcmd = ''
-
     SELECT TOP 1 @dbname = name, @dbid = dbid from @tblDBs where isdone = 0
     IF @@ROWCOUNT = 0
     BEGIN
         BREAK
     END
 
-    SET @sqlcmd = 'DBCC CHECKALLOC(' + CAST(@dbid as varchar) + ')'
+    SET @sqlcmd = 'DBCC CHECKALLOC(' + CAST(@dbid as varchar) + ') WITH NO_INFOMSGS, ALL_ERRORMSGS'
     EXEC sp_executesql @sqlcmd
     INSERT INTO dbo.CommandsRun (command, object)
-    select @sqlcmd, @dbname
+    SELECT @sqlcmd, @dbname
 
-    SET @sqlcmd = 'DBCC CHECKCATALOG(' + CAST(@dbid as varchar) + ')'
+    SET @sqlcmd = 'DBCC CHECKCATALOG(' + CAST(@dbid as varchar) + ') WITH NO_INFOMSGS'
     EXEC sp_executesql @sqlcmd
     INSERT INTO dbo.CommandsRun (command, object)
-    select @sqlcmd, @dbname
+    SELECT @sqlcmd, @dbname
 
     --update loop counter
     UPDATE @tblDBs
@@ -181,31 +178,13 @@ BEGIN
     where name = @dbname
 END
 
---select *
---from dbo.CommandsRun
+----------RUN CHECKTABLE------------------------
 
-----------------------------------------------------------------
-
---For Testing--------------
---SET @JobStartTime = GETDATE()
---SET @TimeLimit = 5
----------------------------
---SET @dbname = ''
---SET @dbid = 0
-
-DECLARE @checkTableDbOrder TABLE (
-    [name] sysname,
-    [dbid] int,
-    [MinStartTime] datetime,
-    [isDone] bit
-)
 INSERT INTO @checkTableDbOrder ([name], [dbid], [MinStartTime], [isDone])
-SELECT database_name, dbid, min(StartTime), 0
-FROM tblObjects GROUP BY database_name, dbid
+SELECT [database_name], [dbid], min([StartTime]), 0
+FROM tblObjects GROUP BY [database_name], [dbid]
 
---select  * from @checkTableDbOrder
-
-WHILE (GETDATE() < DATEADD(SS, @TimeLimit, @JobStartTime) OR @TimeLimit IS NULL) --AND (SELECT COUNT(name) from @checkTableDbOrder where isdone = 0) > 0
+WHILE (GETDATE() < @JobEndTime OR @TimeLimit IS NULL)
 BEGIN
     --Ensures only 1 database is checked at a time, rather than randomly checking tables from random databases
     SELECT TOP 1 @dbname = [name] from @checkTableDbOrder WHERE isDone = 0 ORDER BY MinStartTime
@@ -216,27 +195,23 @@ BEGIN
     END
 
     --Run the CheckTable commands
-    WHILE (GETDATE() < DATEADD(SS, @TimeLimit, @JobStartTime) OR @TimeLimit IS NULL)
+    WHILE (GETDATE() < @JobEndTime OR @TimeLimit IS NULL)
     BEGIN
-        SET @schemaname = ''
-        SET @tablename = ''
-        SET @sqlcmd = ''
+        SELECT TOP 1 @schemaname = [schema], @tablename = [name]
+        FROM tblObjects
+        WHERE @dbname = [database_name]
+        AND StartTime = (SELECT MIN(StartTime) FROM tblObjects WHERE [database_name] = @dbname)  --Makes sure it's the oldest entry for that database
+        AND CAST(StartTime as date) <> CAST(@JobStartTime as date)  --makes sure it's not the same day, as we don't need to run it again
+        AND NumberOfExecutions = (SELECT MIN(NumberOfExecutions) FROM tblObjects)  --makes sure to distribute to other objects and databases
+        AND (DATEADD(MS, AvgRunDuration_MS, GETDATE()) < @JobEndTime OR @TimeLimit IS NULL)  --makes sure it won't select an object that will surpass the end run time
 
-        select top 1 @schemaname = [schema], @tablename = [name]
-        from tblObjects
-        where @dbname = [database_name]
-        AND StartTime = (select min(StartTime) from tblObjects where [database_name] = @dbname)
-        AND CAST(StartTime as date) <> CAST(@JobStartTime as date)
-        AND NumberOfExecutions = (select min(NumberOfExecutions) from tblObjects)
-        --where name = 'Badges' and CAST(StartTime as date) <> CAST(@JobStartTime as date)
-    
         --This will break the loop if all tables are done before the time limit
         IF @@ROWCOUNT = 0
         BEGIN
             BREAK
         END
 
-        SET @sqlcmd = 'USE [' + @dbname + ']; DBCC CHECKTABLE (''' + @schemaname + '.' + @tablename + ''')'
+        SET @sqlcmd = 'USE [' + @dbname + ']; DBCC CHECKTABLE (''' + @schemaname + '.' + @tablename + ''') WITH NO_INFOMSGS, ALL_ERRORMSGS, DATA_PURITY'
 
         UPDATE dbo.tblObjects
         SET StartTime = GETDATE()
@@ -244,11 +219,11 @@ BEGIN
 
         --Log the command
         INSERT INTO dbo.CommandsRun (command, object)
-        select @sqlcmd, QUOTENAME(@dbname) + '.' + QUOTENAME(@schemaname) + '.' + QUOTENAME(@tablename)
+        SELECT @sqlcmd, QUOTENAME(@dbname) + '.' + QUOTENAME(@schemaname) + '.' + QUOTENAME(@tablename)
         --Execute the command
         EXEC sp_executesql @sqlcmd
 
-        --Update End
+        --Update End Time
         UPDATE dbo.tblObjects
         SET EndTime = GETDATE(), [NumberOfExecutions] = [NumberOfExecutions] + 1
         WHERE @dbname = [database_name] AND @schemaname = [schema] AND @tablename = [name]
@@ -272,7 +247,7 @@ order by StartTime desc
 
 select *
 from CommandsRun
-
+order by object
 
 --select SUM(LastRunDuration_MS)/1000
 --from tblObjects
