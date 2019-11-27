@@ -19,10 +19,6 @@ go
 
 DECLARE @TimeLimit int = NULL --in seconds, currently only for CheckTable
 
-DECLARE @JobStartTime datetime = GETDATE()
-DECLARE @JobEndTime datetime = DATEADD(SS, @TimeLimit, @JobStartTime)
-DECLARE @dbname sysname, @dbid int, @tablename sysname, @schemaname sysname, @sqlcmd nvarchar(max)
-
 --DROP TABLE dbo.tblObjects
 
 --Create persistant table to hold information
@@ -44,7 +40,11 @@ CREATE TABLE dbo.tblObjects(
     [AvgRunDuration_MS] int DEFAULT 0
 )
 
---Declare temporary table variables to gather info
+DECLARE @JobStartTime datetime = GETDATE()
+DECLARE @JobEndTime datetime = DATEADD(SS, @TimeLimit, @JobStartTime)
+DECLARE @dbname sysname, @dbid int, @tablename sysname, @schemaname sysname, @sqlcmd nvarchar(max)
+
+--Declare table variables to gather info
 DECLARE @tblDBs TABLE (
     [name] sysname,
     [dbid] int,
