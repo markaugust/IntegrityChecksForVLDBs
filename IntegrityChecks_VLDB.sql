@@ -1,15 +1,9 @@
 /*
-1. Create Table for holding tblBucket info
-2. Create Database Snapshot
+1. Create Table for holding info
+2. Create Database Snapshot (not implemented yet)
 3. DBCC CHECKALLOC on all databases
 4. DBCC CHECKCATALOG on all databases
 5. DBCC CHECKTABLE on each table
-
-Need to add:
-Make sure CheckTable continues to run on same database (done)
-Add option for manual snapshots
-Add Calculations for length of time to run and logic to then pick tables that will fit in that time frame (done)
-Add Calculations for average pages/sec (optional, maybe not needed)
 
 */
 SET NOCOUNT ON
@@ -17,7 +11,7 @@ GO
 use master
 go
 
-DECLARE @TimeLimit int = NULL --in seconds, currently only for CheckTable
+DECLARE @TimeLimit int = 15 --in seconds, currently only for CheckTable
 
 --DROP TABLE dbo.tblObjects
 
@@ -184,6 +178,9 @@ INSERT INTO @checkTableDbOrder ([name], [dbid], [MinStartTime], [isDone])
 SELECT [database_name], [dbid], min([StartTime]), 0
 FROM tblObjects GROUP BY [database_name], [dbid]
 
+DECLARE @InitialRunCheck bit = 0
+DECLARE @OrderBySmallest bit = 0
+
 WHILE (GETDATE() < @JobEndTime OR @TimeLimit IS NULL)
 BEGIN
     --Ensures only 1 database is checked at a time, rather than randomly checking tables from random databases
@@ -194,9 +191,18 @@ BEGIN
         BREAK
     END
 
+
+    IF (SELECT count(dbid) from tblObjects WHERE @dbname = [database_name] and NumberOfExecutions = 0) > 0
+        SET @InitialRunCheck = 1
+
     --Run the CheckTable commands
     WHILE (GETDATE() < @JobEndTime OR @TimeLimit IS NULL)
     BEGIN
+
+        --If GetDate is Greater than the Halfway point, make sure to get smallest tables first
+        IF @InitialRunCheck = 1 AND GETDATE() > DATEADD(MS, DATEDIFF(MS, @JobStartTime, @JobEndTime)/2, @JobStartTime)
+            SET @OrderBySmallest = 1
+
         SELECT TOP 1 @schemaname = [schema], @tablename = [name]
         FROM tblObjects
         WHERE @dbname = [database_name]
@@ -204,6 +210,10 @@ BEGIN
         AND CAST(StartTime as date) <> CAST(@JobStartTime as date)  --makes sure it's not the same day, as we don't need to run it again
         AND NumberOfExecutions = (SELECT MIN(NumberOfExecutions) FROM tblObjects)  --makes sure to distribute to other objects and databases
         AND (DATEADD(MS, AvgRunDuration_MS, GETDATE()) < @JobEndTime OR @TimeLimit IS NULL)  --makes sure it won't select an object that will surpass the end run time
+        --WHEN @OrderBySmallest = 0 it seems to order by ObjectID.
+        --Do we need to sort it by used_page_count desc?
+        --Will need more testing
+        ORDER BY CASE WHEN @OrderBySmallest = 1 THEN used_page_count END DESC
 
         --This will break the loop if all tables are done before the time limit
         IF @@ROWCOUNT = 0
