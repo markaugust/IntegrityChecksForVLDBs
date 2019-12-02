@@ -210,10 +210,11 @@ BEGIN
         AND CAST(StartTime as date) <> CAST(@JobStartTime as date)  --makes sure it's not the same day, as we don't need to run it again
         AND NumberOfExecutions = (SELECT MIN(NumberOfExecutions) FROM tblObjects)  --makes sure to distribute to other objects and databases
         AND (DATEADD(MS, AvgRunDuration_MS, GETDATE()) < @JobEndTime OR @TimeLimit IS NULL)  --makes sure it won't select an object that will surpass the end run time
-        --WHEN @OrderBySmallest = 0 it seems to order by ObjectID.
+        --WHEN @OrderBySmallest = 0 it seems to order by a random column, so having it sort by database_name for consistency.
         --Do we need to sort it by used_page_count desc?
-        --Will need more testing
-        ORDER BY CASE WHEN @OrderBySmallest = 1 THEN used_page_count END DESC
+        ORDER BY
+        CASE WHEN @OrderBySmallest = 1 THEN used_page_count END ASC,
+        CASE WHEN @OrderBySmallest = 0 THEN database_name END ASC
 
         --This will break the loop if all tables are done before the time limit
         IF @@ROWCOUNT = 0
