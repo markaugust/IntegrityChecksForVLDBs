@@ -5,6 +5,15 @@
 4. DBCC CHECKCATALOG on all databases
 5. DBCC CHECKTABLE on each table
 
+Parallel table checks?
+
+Adding tables will need to catch up over time.  Figure out how to handle that.
+
+Large tables that have a longer AvgRunTime then time alloted
+Double Check "LastCheckDate" column logic
+
+Persist last execution time as well
+
 */
 SET NOCOUNT ON
 GO
@@ -25,18 +34,22 @@ CREATE TABLE dbo.tblObjects(
     [name] sysname,
     [schema] sysname,
     [type] CHAR(2),
-    type_desc NVARCHAR(60),
-    used_page_count bigint,
+    [type_desc] nvarchar(60),
+    [used_page_count] bigint,
     [StartTime] datetime DEFAULT '1900-01-01 00:00:00.000',
     [EndTime] datetime,
-    [LastRunDuration_MS] AS DATEDIFF(ms, StartTime, EndTime),
+    [RunDuration_MS] AS DATEDIFF(ms, StartTime, EndTime),
     [NumberOfExecutions] int DEFAULT 0,
-    [AvgRunDuration_MS] int DEFAULT 0
+    [AvgRunDuration_MS] int DEFAULT 0,
+    [PreviousRunDate] date,
+    [PreviousRunDuration_MS] int,
+    [Comment] nvarchar (max),
+    [LastCheckDate] date DEFAULT '1900-01-01'
 )
 
 DECLARE @JobStartTime datetime = GETDATE()
 DECLARE @JobEndTime datetime = DATEADD(SS, @TimeLimit, @JobStartTime)
-DECLARE @dbname sysname, @dbid int, @tablename sysname, @schemaname sysname, @sqlcmd nvarchar(max)
+DECLARE @dbname sysname, @dbid int, @tablename sysname, @schemaname sysname, @sqlcmd nvarchar(max), @avgRun int, @comment nvarchar(max)
 
 --Declare table variables to gather info
 DECLARE @tblDBs TABLE (
@@ -191,8 +204,8 @@ BEGIN
         BREAK
     END
 
-
-    IF (SELECT count(dbid) from tblObjects WHERE @dbname = [database_name] and NumberOfExecutions = 0) > 0
+    --if the number of new tables (execution count = 0) is 
+    IF (SELECT count(dbid) from tblObjects WHERE @dbname = [database_name] and NumberOfExecutions = 0) > (SELECT count(dbid) from tblObjects WHERE @dbname = [database_name] and NumberOfExecutions <> 0)
         SET @InitialRunCheck = 1
 
     --Run the CheckTable commands
@@ -203,45 +216,70 @@ BEGIN
         IF @InitialRunCheck = 1 AND GETDATE() > DATEADD(MS, DATEDIFF(MS, @JobStartTime, @JobEndTime)/2, @JobStartTime)
             SET @OrderBySmallest = 1
 
-        SELECT TOP 1 @schemaname = [schema], @tablename = [name]
+        SELECT TOP 1 @schemaname = [schema], @tablename = [name], @avgRun = AvgRunDuration_MS
         FROM tblObjects
         WHERE @dbname = [database_name]
-        AND StartTime = (SELECT MIN(StartTime) FROM tblObjects WHERE [database_name] = @dbname)  --Makes sure it's the oldest entry for that database
-        AND CAST(StartTime as date) <> CAST(@JobStartTime as date)  --makes sure it's not the same day, as we don't need to run it again
-        AND NumberOfExecutions = (SELECT MIN(NumberOfExecutions) FROM tblObjects)  --makes sure to distribute to other objects and databases
-        AND (DATEADD(MS, AvgRunDuration_MS, GETDATE()) < @JobEndTime OR @TimeLimit IS NULL)  --makes sure it won't select an object that will surpass the end run time
+        AND LastCheckDate = (SELECT MIN(LastCheckDate) FROM tblObjects WHERE [database_name] = @dbname)  --Makes sure it's the oldest entry for that database
+        AND LastCheckDate <> CAST(@JobStartTime as date)  --makes sure it's not the same day, as we don't need to run it again
+        ----AND NumberOfExecutions = (SELECT MIN(NumberOfExecutions) FROM tblObjects)  --makes sure to distribute to other objects and databases
+        --AND (DATEADD(MS, AvgRunDuration_MS, GETDATE()) < @JobEndTime OR @TimeLimit IS NULL)  --makes sure it won't select an object that will surpass the end run time
         --WHEN @OrderBySmallest = 0 it seems to order by a random column, so having it sort by database_name for consistency.
         --Do we need to sort it by used_page_count desc?
         ORDER BY
         CASE WHEN @OrderBySmallest = 1 THEN used_page_count END ASC,
         CASE WHEN @OrderBySmallest = 0 THEN database_name END ASC
 
-        --This will break the loop if all tables are done before the time limit
+        --This will break the loop and move to the next database if all tables are done
         IF @@ROWCOUNT = 0
         BEGIN
             BREAK
         END
 
-        SET @sqlcmd = 'USE [' + @dbname + ']; DBCC CHECKTABLE (''' + @schemaname + '.' + @tablename + ''') WITH NO_INFOMSGS, ALL_ERRORMSGS, DATA_PURITY'
+        --If average run time is longer than remaining time
+        IF @TimeLimit IS NOT NULL AND DATEADD(MS, @avgRun, GETDATE()) > @JobEndTime
+        BEGIN
+            SET @comment = 'Skipped due to TimeLimit Constraint'
+        END
+        ELSE
+        BEGIN
+            SET @sqlcmd = 'USE [' + @dbname + ']; DBCC CHECKTABLE (''' + @schemaname + '.' + @tablename + ''') WITH NO_INFOMSGS, ALL_ERRORMSGS, DATA_PURITY'
+
+            --Store Previous Run Time and Duration
+            UPDATE dbo.tblObjects
+            SET PreviousRunDate = StartTime, PreviousRunDuration_MS = RunDuration_MS
+            WHERE @dbname = [database_name] AND @schemaname = [schema] AND @tablename = [name]
+            
+            --Set StartTime
+            UPDATE dbo.tblObjects
+            SET StartTime = GETDATE()
+            WHERE @dbname = [database_name] AND @schemaname = [schema] AND @tablename = [name]
+
+            --Log the command
+            INSERT INTO dbo.CommandsRun (command, object)
+            SELECT @sqlcmd, QUOTENAME(@dbname) + '.' + QUOTENAME(@schemaname) + '.' + QUOTENAME(@tablename)
+            --Execute the command
+            EXEC sp_executesql @sqlcmd
+
+            --Update End Time
+            UPDATE dbo.tblObjects
+            SET EndTime = GETDATE()
+            WHERE @dbname = [database_name] AND @schemaname = [schema] AND @tablename = [name]
+
+            --Update Execution Count
+            UPDATE dbo.tblObjects
+            SET [NumberOfExecutions] = [NumberOfExecutions] + 1
+            WHERE @dbname = [database_name] AND @schemaname = [schema] AND @tablename = [name]
+
+            --Calculate new Average Runtime
+            UPDATE dbo.tblObjects
+            SET [AvgRunDuration_MS] = [AvgRunDuration_MS] + ([RunDuration_MS] - [AvgRunDuration_MS]) / [NumberOfExecutions]
+            WHERE @dbname = [database_name] AND @schemaname = [schema] AND @tablename = [name]
+
+            SET @comment = @sqlcmd
+        END
 
         UPDATE dbo.tblObjects
-        SET StartTime = GETDATE()
-        WHERE @dbname = [database_name] AND @schemaname = [schema] AND @tablename = [name]
-
-        --Log the command
-        INSERT INTO dbo.CommandsRun (command, object)
-        SELECT @sqlcmd, QUOTENAME(@dbname) + '.' + QUOTENAME(@schemaname) + '.' + QUOTENAME(@tablename)
-        --Execute the command
-        EXEC sp_executesql @sqlcmd
-
-        --Update End Time
-        UPDATE dbo.tblObjects
-        SET EndTime = GETDATE(), [NumberOfExecutions] = [NumberOfExecutions] + 1
-        WHERE @dbname = [database_name] AND @schemaname = [schema] AND @tablename = [name]
-
-        --Calculate new Average Runtime
-        UPDATE dbo.tblObjects
-        SET [AvgRunDuration_MS] = [AvgRunDuration_MS] + ([LastRunDuration_MS] - [AvgRunDuration_MS]) / [NumberOfExecutions]
+        SET [LastCheckDate] = GETDATE(), [Comment] = @comment
         WHERE @dbname = [database_name] AND @schemaname = [schema] AND @tablename = [name]
 
     END
@@ -260,7 +298,7 @@ select *
 from CommandsRun
 order by object
 
---select SUM(LastRunDuration_MS)/1000
+--select SUM(RunDuration_MS)/1000
 --from tblObjects
 
 /*
