@@ -34,20 +34,22 @@ CREATE TABLE dbo.tblObjects(
     [type] CHAR(2),
     [type_desc] nvarchar(60),
     [used_page_count] bigint,
-    [StartTime] datetime DEFAULT '1900-01-01 00:00:00.000',
+    [StartTime] datetime,
     [EndTime] datetime,
-    [RunDuration_MS] AS DATEDIFF(ms, StartTime, EndTime),
+    --[RunDuration_MS] AS DATEDIFF(ms, StartTime, EndTime),
+    [RunDuration_MS] int,
+    [Command] nvarchar(max),
     [NumberOfExecutions] int DEFAULT 0,
     [AvgRunDuration_MS] int DEFAULT 0,
-    [PreviousRunDate] date,
+    [PreviousRunDate] datetime,
     [PreviousRunDuration_MS] int,
-    [Comment] nvarchar (max),
     [LastCheckDate] date DEFAULT '1900-01-01'
+    
 )
 
 DECLARE @JobStartTime datetime = GETDATE()
 DECLARE @JobEndTime datetime = DATEADD(SS, @TimeLimit, @JobStartTime)
-DECLARE @dbname sysname, @dbid int, @tablename sysname, @schemaname sysname, @sqlcmd nvarchar(max), @avgRun int, @comment nvarchar(max)
+DECLARE @dbname sysname, @dbid int, @tablename sysname, @schemaname sysname, @sqlcmd nvarchar(max), @avgRun int, @command nvarchar(max)
 DECLARE @previousRunDate date, @prevousRunDuration_MS int, @startTime datetime, @endTime datetime
 
 --Declare table variables to gather info
@@ -69,7 +71,7 @@ DECLARE @tblObj TABLE (
 DECLARE @checkTableDbOrder TABLE (
     [name] sysname,
     [dbid] int,
-    [MinStartTime] datetime,
+    [MinLastCheckDate] datetime,
     [isDone] bit
 )
 
@@ -186,8 +188,8 @@ END
 
 ----------RUN CHECKTABLE------------------------
 
-INSERT INTO @checkTableDbOrder ([name], [dbid], [MinStartTime], [isDone])
-SELECT [database_name], [dbid], min([StartTime]), 0
+INSERT INTO @checkTableDbOrder ([name], [dbid], [MinLastCheckDate], [isDone])
+SELECT [database_name], [dbid], min([LastCheckDate]), 0
 FROM tblObjects GROUP BY [database_name], [dbid]
 
 DECLARE @InitialRunCheck bit = 0
@@ -196,15 +198,15 @@ DECLARE @OrderBySmallest bit = 0
 WHILE (GETDATE() < @JobEndTime OR @TimeLimit IS NULL)
 BEGIN
     --Ensures only 1 database is checked at a time, rather than randomly checking tables from random databases
-    SELECT TOP 1 @dbname = [name] from @checkTableDbOrder WHERE isDone = 0 ORDER BY MinStartTime
+    SELECT TOP 1 @dbname = [name] from @checkTableDbOrder WHERE isDone = 0 ORDER BY MinLastCheckDate
     --This will break the loop if all databases are done before the time limit
     IF @@ROWCOUNT = 0
     BEGIN
         BREAK
     END
 
-    --if the number of new tables (execution count = 0) is 
-    IF (SELECT count(dbid) from tblObjects WHERE @dbname = [database_name] and NumberOfExecutions = 0) > (SELECT count(dbid) from tblObjects WHERE @dbname = [database_name] and NumberOfExecutions <> 0)
+    --if the number of new tables (execution count = 0) is greater than existing (execution count > 0)
+    IF (SELECT count([database_name]) from tblObjects WHERE @dbname = [database_name] and NumberOfExecutions = 0) > (SELECT count([database_name]) from tblObjects WHERE @dbname = [database_name] and NumberOfExecutions > 0)
         SET @InitialRunCheck = 1
 
     --Run the CheckTable commands
@@ -215,7 +217,12 @@ BEGIN
         IF @InitialRunCheck = 1 AND GETDATE() > DATEADD(MS, DATEDIFF(MS, @JobStartTime, @JobEndTime)/2, @JobStartTime)
             SET @OrderBySmallest = 1
 
-        SELECT TOP 1 @schemaname = [schema], @tablename = [name], @avgRun = AvgRunDuration_MS
+        SELECT TOP 1
+            @schemaname = [schema],
+            @tablename = [name],
+            @avgRun = [AvgRunDuration_MS],
+            @previousRunDate = [StartTime],
+            @prevousRunDuration_MS = [RunDuration_MS]
         FROM tblObjects
         WHERE @dbname = [database_name]
         AND LastCheckDate = (SELECT MIN(LastCheckDate) FROM tblObjects WHERE [database_name] = @dbname)  --Makes sure it's the oldest entry for that database
@@ -237,7 +244,7 @@ BEGIN
         --If average run time is longer than remaining time
         IF @TimeLimit IS NOT NULL AND DATEADD(MS, @avgRun, GETDATE()) > @JobEndTime
         BEGIN
-            SET @comment = 'Skipped due to TimeLimit Constraint'
+            SET @command = 'Skipped due to TimeLimit Constraint'
             SET @startTime = GETDATE()
         END
         ELSE
@@ -245,9 +252,9 @@ BEGIN
             SET @sqlcmd = 'USE [' + @dbname + ']; DBCC CHECKTABLE (''' + @schemaname + '.' + @tablename + ''') WITH NO_INFOMSGS, ALL_ERRORMSGS, DATA_PURITY'
 
             --Store Previous Run Time and Duration
-            SELECT @previousRunDate = StartTime, @prevousRunDuration_MS = RunDuration_MS
-            FROM dbo.tblObjects
-            WHERE @dbname = [database_name] AND @schemaname = [schema] AND @tablename = [name]
+            -- SELECT @previousRunDate = StartTime, @prevousRunDuration_MS = RunDuration_MS
+            -- FROM dbo.tblObjects
+            -- WHERE @dbname = [database_name] AND @schemaname = [schema] AND @tablename = [name]
             -- UPDATE dbo.tblObjects
             -- SET PreviousRunDate = StartTime, PreviousRunDuration_MS = RunDuration_MS
             -- WHERE @dbname = [database_name] AND @schemaname = [schema] AND @tablename = [name]
@@ -276,19 +283,22 @@ BEGIN
             , PreviousRunDuration_MS = @prevousRunDuration_MS
             , StartTime = @startTime
             , EndTime = @endTime
+            , [RunDuration_MS] = DATEDIFF(ms, @startTime, @endTime)
             , [NumberOfExecutions] = [NumberOfExecutions] + 1
             WHERE @dbname = [database_name] AND @schemaname = [schema] AND @tablename = [name]
 
             --Calculate new Average Runtime
-            UPDATE dbo.tblObjects
-            SET [AvgRunDuration_MS] = [AvgRunDuration_MS] + ([RunDuration_MS] - [AvgRunDuration_MS]) / [NumberOfExecutions]
+            --This formula works since the number of executions is being updated in the previous step
+            SELECT @avgRun = [AvgRunDuration_MS] + (([RunDuration_MS] - [AvgRunDuration_MS]) / [NumberOfExecutions])
+            FROM dbo.tblObjects
             WHERE @dbname = [database_name] AND @schemaname = [schema] AND @tablename = [name]
 
-            SET @comment = @sqlcmd
+            SET @command = @sqlcmd
         END
 
+        --Update LastCheckDate, Command, and AvgRunDuration
         UPDATE dbo.tblObjects
-        SET [LastCheckDate] = @startTime, [Comment] = @comment
+        SET [LastCheckDate] = @startTime, [Command] = @command, [AvgRunDuration_MS] = @avgRun
         WHERE @dbname = [database_name] AND @schemaname = [schema] AND @tablename = [name]
 
     END
