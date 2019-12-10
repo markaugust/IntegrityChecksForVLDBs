@@ -7,8 +7,6 @@
 
 Parallel table checks?
 
-Adding tables will need to catch up over time.  Figure out how to handle that.
-
 Large tables that have a longer AvgRunTime then time alloted
 Double Check "LastCheckDate" column logic
 
@@ -50,6 +48,7 @@ CREATE TABLE dbo.tblObjects(
 DECLARE @JobStartTime datetime = GETDATE()
 DECLARE @JobEndTime datetime = DATEADD(SS, @TimeLimit, @JobStartTime)
 DECLARE @dbname sysname, @dbid int, @tablename sysname, @schemaname sysname, @sqlcmd nvarchar(max), @avgRun int, @comment nvarchar(max)
+DECLARE @previousRunDate date, @prevousRunDuration_MS int, @startTime datetime, @endTime datetime
 
 --Declare table variables to gather info
 DECLARE @tblDBs TABLE (
@@ -239,20 +238,25 @@ BEGIN
         IF @TimeLimit IS NOT NULL AND DATEADD(MS, @avgRun, GETDATE()) > @JobEndTime
         BEGIN
             SET @comment = 'Skipped due to TimeLimit Constraint'
+            SET @startTime = GETDATE()
         END
         ELSE
         BEGIN
             SET @sqlcmd = 'USE [' + @dbname + ']; DBCC CHECKTABLE (''' + @schemaname + '.' + @tablename + ''') WITH NO_INFOMSGS, ALL_ERRORMSGS, DATA_PURITY'
 
             --Store Previous Run Time and Duration
-            UPDATE dbo.tblObjects
-            SET PreviousRunDate = StartTime, PreviousRunDuration_MS = RunDuration_MS
+            SELECT @previousRunDate = StartTime, @prevousRunDuration_MS = RunDuration_MS
+            FROM dbo.tblObjects
             WHERE @dbname = [database_name] AND @schemaname = [schema] AND @tablename = [name]
+            -- UPDATE dbo.tblObjects
+            -- SET PreviousRunDate = StartTime, PreviousRunDuration_MS = RunDuration_MS
+            -- WHERE @dbname = [database_name] AND @schemaname = [schema] AND @tablename = [name]
             
             --Set StartTime
-            UPDATE dbo.tblObjects
-            SET StartTime = GETDATE()
-            WHERE @dbname = [database_name] AND @schemaname = [schema] AND @tablename = [name]
+            SET @startTime = GETDATE()
+            -- UPDATE dbo.tblObjects
+            -- SET StartTime = GETDATE()
+            -- WHERE @dbname = [database_name] AND @schemaname = [schema] AND @tablename = [name]
 
             --Log the command
             INSERT INTO dbo.CommandsRun (command, object)
@@ -260,14 +264,19 @@ BEGIN
             --Execute the command
             EXEC sp_executesql @sqlcmd
 
-            --Update End Time
-            UPDATE dbo.tblObjects
-            SET EndTime = GETDATE()
-            WHERE @dbname = [database_name] AND @schemaname = [schema] AND @tablename = [name]
+            --Set End Time
+            SET @endTime = GETDATE()
+            -- UPDATE dbo.tblObjects
+            -- SET EndTime = GETDATE()
+            -- WHERE @dbname = [database_name] AND @schemaname = [schema] AND @tablename = [name]
 
-            --Update Execution Count
+            --Update Previous Run date/duration, Start/End time of Execution and Execution Count
             UPDATE dbo.tblObjects
-            SET [NumberOfExecutions] = [NumberOfExecutions] + 1
+            SET PreviousRunDate = @previousRunDate
+            , PreviousRunDuration_MS = @prevousRunDuration_MS
+            , StartTime = @startTime
+            , EndTime = @endTime
+            , [NumberOfExecutions] = [NumberOfExecutions] + 1
             WHERE @dbname = [database_name] AND @schemaname = [schema] AND @tablename = [name]
 
             --Calculate new Average Runtime
@@ -279,7 +288,7 @@ BEGIN
         END
 
         UPDATE dbo.tblObjects
-        SET [LastCheckDate] = GETDATE(), [Comment] = @comment
+        SET [LastCheckDate] = @startTime, [Comment] = @comment
         WHERE @dbname = [database_name] AND @schemaname = [schema] AND @tablename = [name]
 
     END
