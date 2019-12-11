@@ -14,6 +14,8 @@ use master
 go
 
 DECLARE @TimeLimit int = 15
+DECLARE @Databases nvarchar(max) = NULL
+--DECLARE @PhysicalOnly nvarchar(1) = 'N'
 
 --DROP TABLE dbo.tblObjects
 
@@ -37,7 +39,8 @@ CREATE TABLE dbo.tblObjects(
     [AvgRunDuration_MS] int DEFAULT 0,
     [PreviousRunDate] datetime,
     [PreviousRunDuration_MS] int,
-    [LastCheckDate] date DEFAULT '1900-01-01'
+    [LastCheckDate] date DEFAULT '1900-01-01',
+    [Active] bit
     
 )
 
@@ -49,7 +52,7 @@ DECLARE @JobStartTime datetime = GETDATE()
 DECLARE @JobEndTime datetime = DATEADD(SS, @TimeLimit, @JobStartTime)
 DECLARE @dbname sysname, @dbid int, @tablename sysname, @schemaname sysname, @sqlcmd nvarchar(max), @avgRun int, @command nvarchar(max)
 DECLARE @previousRunDate datetime, @prevousRunDuration_MS int, @cmdStartTime datetime, @cmdEndTime datetime
-DECLARE @origExecutionCount int, @newRunDuration int, @newExecutionCount int
+DECLARE @origExecutionCount int, @newRunDuration int, @newExecutionCount int, @lastCheckDate date
 
 --Declare table variables to gather info
 DECLARE @tblDBs TABLE (
@@ -80,13 +83,177 @@ DECLARE @checkTableDbOrder TABLE (
 
 --Get names of databases and track for loop
 --This is where you would adjust what databases you want to check
-INSERT INTO @tblDBs (name, dbid, isdone)
-SELECT name, database_id, 0 as isdone
+-- INSERT INTO @tblDBs (name, dbid, isdone)
+-- SELECT name, database_id, 0 as isdone
+-- FROM sys.databases
+-- WHERE is_read_only = 0 --only databases that are READ_WRITE
+-- AND state = 0 --only databases that are ONLINE
+-- AND database_id <> 2 --exclude tempdb
+-- AND name IN ('StackOverflow2010','AdventureWorks2017') --for testing
+
+IF @Databases IS NULL
+    SET @Databases = 'ALL_DATABASES'
+
+-----------------------------------------------------------------
+----------vvvv LOVINGLY STOLEN FROM OLA vvvv---------------------
+-----------------------------------------------------------------
+DECLARE @ErrorMessage nvarchar(max)
+DECLARE @Error int
+DECLARE @ReturnCode int
+
+DECLARE @EmptyLine nvarchar(max)
+
+SET @Error = 0
+SET @ReturnCode = 0
+
+SET @EmptyLine = CHAR(9)
+
+DECLARE @SelectedDatabases TABLE (DatabaseName nvarchar(max),
+                                DatabaseType nvarchar(max),
+                                AvailabilityGroup nvarchar(max),
+                                StartPosition int,
+                                Selected bit)
+
+DECLARE @tmpDatabases TABLE (ID int IDENTITY,
+                            DatabaseName nvarchar(max),
+                            DatabaseType nvarchar(max),
+                            AvailabilityGroup bit,
+                            [Snapshot] bit,
+                            StartPosition int,
+                            LastCommandTime datetime,
+                            DatabaseSize bigint,
+                            LastGoodCheckDbTime datetime,
+                            [Order] int,
+                            Selected bit,
+                            Completed bit,
+                            PRIMARY KEY(Selected, Completed, [Order], ID))
+
+SET @Databases = REPLACE(@Databases, CHAR(10), '')
+SET @Databases = REPLACE(@Databases, CHAR(13), '')
+
+WHILE CHARINDEX(', ',@Databases) > 0 SET @Databases = REPLACE(@Databases,', ',',')
+WHILE CHARINDEX(' ,',@Databases) > 0 SET @Databases = REPLACE(@Databases,' ,',',')
+
+SET @Databases = LTRIM(RTRIM(@Databases));
+
+WITH Databases1 (StartPosition, EndPosition, DatabaseItem) AS
+(
+SELECT 1 AS StartPosition,
+       ISNULL(NULLIF(CHARINDEX(',', @Databases, 1), 0), LEN(@Databases) + 1) AS EndPosition,
+       SUBSTRING(@Databases, 1, ISNULL(NULLIF(CHARINDEX(',', @Databases, 1), 0), LEN(@Databases) + 1) - 1) AS DatabaseItem
+WHERE @Databases IS NOT NULL
+UNION ALL
+SELECT CAST(EndPosition AS int) + 1 AS StartPosition,
+       ISNULL(NULLIF(CHARINDEX(',', @Databases, EndPosition + 1), 0), LEN(@Databases) + 1) AS EndPosition,
+       SUBSTRING(@Databases, EndPosition + 1, ISNULL(NULLIF(CHARINDEX(',', @Databases, EndPosition + 1), 0), LEN(@Databases) + 1) - EndPosition - 1) AS DatabaseItem
+FROM Databases1
+WHERE EndPosition < LEN(@Databases) + 1
+),
+Databases2 (DatabaseItem, StartPosition, Selected) AS
+(
+SELECT CASE WHEN DatabaseItem LIKE '-%' THEN RIGHT(DatabaseItem,LEN(DatabaseItem) - 1) ELSE DatabaseItem END AS DatabaseItem,
+       StartPosition,
+       CASE WHEN DatabaseItem LIKE '-%' THEN 0 ELSE 1 END AS Selected
+FROM Databases1
+),
+Databases3 (DatabaseItem, DatabaseType, AvailabilityGroup, StartPosition, Selected) AS
+(
+SELECT CASE WHEN DatabaseItem IN('ALL_DATABASES','SYSTEM_DATABASES','USER_DATABASES','AVAILABILITY_GROUP_DATABASES') THEN '%' ELSE DatabaseItem END AS DatabaseItem,
+       CASE WHEN DatabaseItem = 'SYSTEM_DATABASES' THEN 'S' WHEN DatabaseItem = 'USER_DATABASES' THEN 'U' ELSE NULL END AS DatabaseType,
+       CASE WHEN DatabaseItem = 'AVAILABILITY_GROUP_DATABASES' THEN 1 ELSE NULL END AvailabilityGroup,
+       StartPosition,
+       Selected
+FROM Databases2
+),
+Databases4 (DatabaseName, DatabaseType, AvailabilityGroup, StartPosition, Selected) AS
+(
+SELECT CASE WHEN LEFT(DatabaseItem,1) = '[' AND RIGHT(DatabaseItem,1) = ']' THEN PARSENAME(DatabaseItem,1) ELSE DatabaseItem END AS DatabaseItem,
+       DatabaseType,
+       AvailabilityGroup,
+       StartPosition,
+       Selected
+FROM Databases3
+)
+INSERT INTO @SelectedDatabases (DatabaseName, DatabaseType, AvailabilityGroup, StartPosition, Selected)
+SELECT DatabaseName,
+       DatabaseType,
+       AvailabilityGroup,
+       StartPosition,
+       Selected
+FROM Databases4
+OPTION (MAXRECURSION 0)
+
+INSERT INTO @tmpDatabases (DatabaseName, DatabaseType, AvailabilityGroup, [Snapshot], [Order], Selected, Completed)
+SELECT [name] AS DatabaseName,
+       CASE WHEN name IN('master','msdb','model') OR is_distributor = 1 THEN 'S' ELSE 'U' END AS DatabaseType,
+       NULL AS AvailabilityGroup,
+       CASE WHEN source_database_id IS NOT NULL THEN 1 ELSE 0 END AS [Snapshot],
+       0 AS [Order],
+       0 AS Selected,
+       0 AS Completed
 FROM sys.databases
-WHERE is_read_only = 0 --only databases that are READ_WRITE
-AND state = 0 --only databases that are ONLINE
-AND database_id <> 2 --exclude tempdb
-AND name IN ('StackOverflow2010','AdventureWorks2017') --for testing
+ORDER BY [name] ASC
+
+--Adds wanted databases to selection
+UPDATE tmpDatabases
+SET tmpDatabases.Selected = SelectedDatabases.Selected
+FROM @tmpDatabases tmpDatabases
+INNER JOIN @SelectedDatabases SelectedDatabases
+ON tmpDatabases.DatabaseName LIKE REPLACE(SelectedDatabases.DatabaseName,'_','[_]')
+AND (tmpDatabases.DatabaseType = SelectedDatabases.DatabaseType OR SelectedDatabases.DatabaseType IS NULL)
+AND (tmpDatabases.AvailabilityGroup = SelectedDatabases.AvailabilityGroup OR SelectedDatabases.AvailabilityGroup IS NULL)
+AND NOT ((tmpDatabases.DatabaseName = 'tempdb' OR tmpDatabases.[Snapshot] = 1) AND tmpDatabases.DatabaseName <> SelectedDatabases.DatabaseName)
+WHERE SelectedDatabases.Selected = 1
+
+--Removes unwanted databases from selection
+UPDATE tmpDatabases
+SET tmpDatabases.Selected = SelectedDatabases.Selected
+FROM @tmpDatabases tmpDatabases
+INNER JOIN @SelectedDatabases SelectedDatabases
+ON tmpDatabases.DatabaseName LIKE REPLACE(SelectedDatabases.DatabaseName,'_','[_]')
+AND (tmpDatabases.DatabaseType = SelectedDatabases.DatabaseType OR SelectedDatabases.DatabaseType IS NULL)
+AND (tmpDatabases.AvailabilityGroup = SelectedDatabases.AvailabilityGroup OR SelectedDatabases.AvailabilityGroup IS NULL)
+AND NOT ((tmpDatabases.DatabaseName = 'tempdb' OR tmpDatabases.[Snapshot] = 1) AND tmpDatabases.DatabaseName <> SelectedDatabases.DatabaseName)
+WHERE SelectedDatabases.Selected = 0
+
+--Update Start Position
+UPDATE tmpDatabases
+SET tmpDatabases.StartPosition = SelectedDatabases2.StartPosition
+FROM @tmpDatabases tmpDatabases
+INNER JOIN (SELECT tmpDatabases.DatabaseName, MIN(SelectedDatabases.StartPosition) AS StartPosition
+            FROM @tmpDatabases tmpDatabases
+            INNER JOIN @SelectedDatabases SelectedDatabases
+            ON tmpDatabases.DatabaseName LIKE REPLACE(SelectedDatabases.DatabaseName,'_','[_]')
+            AND (tmpDatabases.DatabaseType = SelectedDatabases.DatabaseType OR SelectedDatabases.DatabaseType IS NULL)
+            AND (tmpDatabases.AvailabilityGroup = SelectedDatabases.AvailabilityGroup OR SelectedDatabases.AvailabilityGroup IS NULL)
+            WHERE SelectedDatabases.Selected = 1
+            GROUP BY tmpDatabases.DatabaseName) SelectedDatabases2
+ON tmpDatabases.DatabaseName = SelectedDatabases2.DatabaseName
+
+IF @Databases IS NOT NULL AND (NOT EXISTS(SELECT * FROM @SelectedDatabases) OR EXISTS(SELECT * FROM @SelectedDatabases WHERE DatabaseName IS NULL OR DatabaseName = ''))
+BEGIN
+  SET @ErrorMessage = 'The value for the parameter @Databases is not supported.'
+  RAISERROR('%s',16,1,@ErrorMessage) WITH NOWAIT
+  SET @Error = @@ERROR
+  RAISERROR(@EmptyLine,10,1) WITH NOWAIT
+END
+
+;WITH tmpDatabases AS (
+    SELECT DatabaseName, [Order], ROW_NUMBER() OVER (ORDER BY StartPosition ASC, DatabaseName ASC) AS RowNumber
+    FROM @tmpDatabases tmpDatabases
+    WHERE Selected = 1
+)
+UPDATE tmpDatabases
+SET [Order] = RowNumber
+
+-----------------------------------------------------------------
+----------^^^^ LOVINGLY STOLEN FROM OLA ^^^^---------------------
+-----------------------------------------------------------------
+
+INSERT INTO @tblDBs (name, dbid, isdone)
+SELECT DatabaseName, ID, 0 as isdone
+FROM @tmpDatabases
+WHERE Selected = 1
 
 --loop through all databases gathered and get page count for each table in the database
 WHILE 1=1
@@ -126,7 +293,7 @@ MERGE master.dbo.tblObjects as [Target]
 USING (SELECT * FROM @tblObj) as [Source]
 ON (Target.database_name = Source.database_name AND Target.[schema] = Source.[schema] AND Target.name = Source.name)
 WHEN MATCHED AND Target.used_page_count <> source.used_page_count THEN
-    UPDATE SET Target.used_page_count = source.used_page_count
+    UPDATE SET Target.used_page_count = source.used_page_count, Target.Active = 1
 WHEN NOT MATCHED BY TARGET THEN
     INSERT ([database_name]
       ,[dbid]
@@ -135,7 +302,8 @@ WHEN NOT MATCHED BY TARGET THEN
       ,[schema]
       ,[type]
       ,[type_desc]
-      ,[used_page_count])
+      ,[used_page_count]
+      ,[Active])
     VALUES (Source.[database_name]
       ,Source.[dbid]
       ,Source.[object_id]
@@ -143,9 +311,11 @@ WHEN NOT MATCHED BY TARGET THEN
       ,Source.[schema]
       ,Source.[type]
       ,Source.[type_desc]
-      ,Source.[used_page_count])
+      ,Source.[used_page_count]
+      ,1)
 WHEN NOT MATCHED BY SOURCE THEN
-    DELETE
+    --DELETE
+    UPDATE SET Active = 0
 ;
 
 -----------------------------------------------------------------
@@ -232,9 +402,11 @@ BEGIN
             @prevousRunDuration_MS = [RunDuration_MS],
             @origExecutionCount = [NumberOfExecutions],
             @cmdStartTime = [StartTime],
-            @cmdEndTime = [EndTime]
+            @cmdEndTime = [EndTime],
+            @lastCheckDate = [LastCheckDate]
         FROM tblObjects
         WHERE @dbname = [database_name]
+        AND Active = 1
         AND LastCheckDate = (SELECT MIN(LastCheckDate) FROM tblObjects WHERE [database_name] = @dbname)  --Makes sure it's the oldest entry for that database
         AND LastCheckDate <> CAST(@JobStartTime as date)  --makes sure it's not the same day, as we don't need to run it again
         ORDER BY
@@ -246,6 +418,10 @@ BEGIN
         BEGIN
             BREAK
         END
+
+        /*  Add logic for if avgrun = 0 for first time runs
+        IF @avgRun = 0
+        */
 
         --If average run time is longer than remaining time + one minute to give a little overhead
         IF @TimeLimit IS NOT NULL AND DATEADD(MS, @avgRun, @cmdStartTime) > DATEADD(MI, 1, @JobEndTime)
@@ -263,8 +439,9 @@ BEGIN
             --Execute the command
             EXEC sp_executesql @sqlcmd
 
-            --Set End Time
+            --Set End Time and last check date
             SET @cmdEndTime = GETDATE()
+            SET @lastCheckDate = @cmdEndTime
 
             --Set run duration of this run and the new execution count
             SET @newRunDuration = DATEDIFF(ms, @cmdStartTime, @cmdEndTime)
@@ -272,7 +449,7 @@ BEGIN
 
             --Calculate the new average run time
             --This formula works since the number of executions is being updated in the previous step            
-            SET @avgRun = @avgRun + ((@newRunDuration - @avgRun) / [@newExecutionCount])
+            SET @avgRun = @avgRun + ((@newRunDuration - @avgRun) / @newExecutionCount)
 
             SET @command = 'Command Executed: ' + @sqlcmd
         END
