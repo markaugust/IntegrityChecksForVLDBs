@@ -410,7 +410,7 @@ END
 
 INSERT INTO @checkTableDbOrder ([name], [dbid], [dbtype], [MinLastCheckDate], [isDone])
 SELECT [database_name], [dbid], [dbtype], min([LastCheckDate]), 0
-FROM tblObjects GROUP BY [database_name], [dbid]
+FROM tblObjects GROUP BY [database_name], [dbid], [dbtype]
 
 DECLARE @InitialRunCheck bit = 0
 DECLARE @OrderBySmallest bit = 0
@@ -442,11 +442,11 @@ BEGIN
     IF NOT (@hasMemOptFG = 1 OR @dbtype = 'S')
     BEGIN
         --Build and execute create snapshot statement
-        SET @snapName = @dbname + '_CHKALOCCAT_snapshot_' + CONVERT(nvarchar, @JobStartTime, 112)
+        SET @snapName = @dbname + '_CHKTABLE_snapshot_' + CONVERT(nvarchar, @JobStartTime, 112)
         SET @sqlcmd = 'CREATE DATABASE ' + QUOTENAME(@snapName) + ' ON '
         SELECT @sqlcmd = @sqlcmd + '(Name = ' + QUOTENAME(name) + ', Filename = '''
             + CASE WHEN @SnapshotPath IS NULL THEN physical_name ELSE @SnapshotPath + '\' + name END
-            + '_CHKALOCCAT_snapshot_' + CONVERT(nvarchar, @JobStartTime, 112) + '''),'
+            + '_CHKTABLE_snapshot_' + CONVERT(nvarchar, @JobStartTime, 112) + '''),'
         FROM sys.master_files WHERE database_id = @dbid AND type = 0
         SET @sqlcmd = LEFT(@sqlcmd, LEN(@sqlcmd) - 1)
         SET @sqlcmd = @sqlcmd + ' AS SNAPSHOT OF ' + QUOTENAME(@dbname)
