@@ -13,10 +13,16 @@ GO
 use master
 go
 
-DECLARE @TimeLimit int = NULL
-DECLARE @Databases nvarchar(max) = NULL
-DECLARE @SnapshotPath nvarchar(300) = NULL
---DECLARE @PhysicalOnly nvarchar(1) = 'N'
+--These will be the SP Parameters
+DECLARE
+    @TimeLimit int = NULL,
+    @Databases nvarchar(max) = NULL,
+    @SnapshotPath nvarchar(300) = NULL,
+    @LogToTable nvarchar(max) = 'Y',
+    @Execute nvarchar(max) = 'Y'
+    --DECLARE @PhysicalOnly nvarchar(1) = 'N'
+
+----------
 
 IF @Databases IS NULL
     SET @Databases = 'ALL_DATABASES'
@@ -379,15 +385,17 @@ BEGIN
 
     --Run CheckAlloc
     SET @sqlcmd = 'DBCC CHECKALLOC([' + @checkDbName + ']) WITH NO_INFOMSGS, ALL_ERRORMSGS'
-    EXEC sp_executesql @sqlcmd
-    INSERT INTO dbo.CommandsRun (command, object)
-    SELECT @sqlcmd, @checkDbName
+    EXECUTE [dbo].[CommandExecute] @Command = @sqlcmd, @CommandType = 'Marks Custom CheckAlloc', @Mode = 1, @DatabaseName = @checkDbName, @LogToTable = @LogToTable, @Execute = @Execute
+    -- EXEC sp_executesql @sqlcmd
+    -- INSERT INTO dbo.CommandsRun (command, object)
+    -- SELECT @sqlcmd, @checkDbName
 
     --Run CheckCatalog
     SET @sqlcmd = 'DBCC CHECKCATALOG([' + @checkDbName + ']) WITH NO_INFOMSGS'
-    EXEC sp_executesql @sqlcmd
-    INSERT INTO dbo.CommandsRun (command, object)
-    SELECT @sqlcmd, @checkDbName
+    EXECUTE [dbo].[CommandExecute] @Command = @sqlcmd, @CommandType = 'Marks Custom CheckCatalog', @Mode = 1, @DatabaseName = @checkDbName, @LogToTable = @LogToTable, @Execute = @Execute
+    -- EXEC sp_executesql @sqlcmd
+    -- INSERT INTO dbo.CommandsRun (command, object)
+    -- SELECT @sqlcmd, @checkDbName
 
     --Drop Database Snapshot if one was created manually
     IF @snapCreated = 1
@@ -508,10 +516,11 @@ BEGIN
             SET @sqlcmd = 'USE [' + @checkDbName + ']; DBCC CHECKTABLE (''' + @schemaname + '.' + @tablename + ''') WITH NO_INFOMSGS, ALL_ERRORMSGS, DATA_PURITY'
 
             --Log the command
-            INSERT INTO dbo.CommandsRun (command, object)
-            SELECT @sqlcmd, QUOTENAME(@checkDbName) + '.' + QUOTENAME(@schemaname) + '.' + QUOTENAME(@tablename)
-            --Execute the command
-            EXEC sp_executesql @sqlcmd
+            -- INSERT INTO dbo.CommandsRun (command, object)
+            -- SELECT @sqlcmd, QUOTENAME(@checkDbName) + '.' + QUOTENAME(@schemaname) + '.' + QUOTENAME(@tablename)
+            -- --Execute the command
+            -- EXEC sp_executesql @sqlcmd
+            EXECUTE [dbo].[CommandExecute] @Command = @sqlcmd, @CommandType = 'Marks Custom CheckTable', @Mode = 1, @DatabaseName = @checkDbName, @SchemaName = @schemaname, @ObjectName = @tablename, @ObjectType = NULL, @LogToTable = @LogToTable, @Execute = @Execute
 
             --Set End Time and last check date
             SET @cmdEndTime = GETDATE()
