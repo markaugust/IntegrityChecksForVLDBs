@@ -19,8 +19,9 @@ DECLARE
     @Databases nvarchar(max) = NULL,
     @SnapshotPath nvarchar(300) = NULL,
     @LogToTable nvarchar(max) = 'Y',
-    @Execute nvarchar(max) = 'Y'
-    --DECLARE @PhysicalOnly nvarchar(1) = 'N'
+    @Execute nvarchar(max) = 'Y',
+    @PhysicalOnly nvarchar(1) = 'N',
+    @MaxDOP int = NULL
 
 ----------
 
@@ -338,6 +339,59 @@ END
 UPDATE tmpDatabases
 SET [Order] = RowNumber
 
+----------------------------------------------------------------------------------------------------
+--// Check input parameters                                                                     //--
+----------------------------------------------------------------------------------------------------
+
+IF @PhysicalOnly NOT IN ('Y','N') OR @PhysicalOnly IS NULL
+BEGIN
+    SET @ErrorMessage = 'The value for the parameter @PhysicalOnly is not supported.'
+    RAISERROR('%s',16,1,@ErrorMessage) WITH NOWAIT
+    SET @Error = @@ERROR
+    RAISERROR(@EmptyLine,10,1) WITH NOWAIT
+END
+
+IF @MaxDOP < 0 OR @MaxDOP > 64 OR (@MaxDOP IS NOT NULL AND NOT (@Version >= 12.050000 OR SERVERPROPERTY('EngineEdition') IN (5, 8)))
+BEGIN
+    SET @ErrorMessage = 'The value for the parameter @MaxDOP is not supported.'
+    RAISERROR('%s',16,1,@ErrorMessage) WITH NOWAIT
+    SET @Error = @@ERROR
+    RAISERROR(@EmptyLine,10,1) WITH NOWAIT
+END
+
+IF @TimeLimit < 0
+BEGIN
+    SET @ErrorMessage = 'The value for the parameter @TimeLimit is not supported.'
+    RAISERROR('%s',16,1,@ErrorMessage) WITH NOWAIT
+    SET @Error = @@ERROR
+    RAISERROR(@EmptyLine,10,1) WITH NOWAIT
+END
+
+IF @LogToTable NOT IN('Y','N') OR @LogToTable IS NULL
+BEGIN
+    SET @ErrorMessage = 'The value for the parameter @LogToTable is not supported.'
+    RAISERROR('%s',16,1,@ErrorMessage) WITH NOWAIT
+    SET @Error = @@ERROR
+    RAISERROR(@EmptyLine,10,1) WITH NOWAIT
+END
+
+IF @Execute NOT IN('Y','N') OR @Execute IS NULL
+BEGIN
+    SET @ErrorMessage = 'The value for the parameter @Execute is not supported.'
+    RAISERROR('%s',16,1,@ErrorMessage) WITH NOWAIT
+    SET @Error = @@ERROR
+    RAISERROR(@EmptyLine,10,1) WITH NOWAIT
+END
+
+IF @Error <> 0
+BEGIN
+    SET @ErrorMessage = 'The documentation is available at https://ola.hallengren.com/sql-server-integrity-check.html.'
+    RAISERROR('%s',16,1,@ErrorMessage) WITH NOWAIT
+    RAISERROR(@EmptyLine,10,1) WITH NOWAIT
+    SET @ReturnCode = @Error
+    GOTO Logging
+END
+
 -----------------------------------------------------------------
 ----------^^^^ LOVINGLY STOLEN FROM OLA ^^^^---------------------
 -----------------------------------------------------------------
@@ -602,7 +656,10 @@ BEGIN
         ELSE
         BEGIN
             SET @cmdStartTime = GETDATE()
-            SET @sqlcmd = 'USE [' + @checkDbName + ']; DBCC CHECKTABLE (''' + @schemaname + '.' + @tablename + ''') WITH NO_INFOMSGS, ALL_ERRORMSGS, DATA_PURITY'
+            SET @sqlcmd = 'USE [' + @checkDbName + ']; DBCC CHECKTABLE (''' + QUOTENAME(@schemaname) + '.' + QUOTENAME(@tablename) + ''') WITH NO_INFOMSGS, ALL_ERRORMSGS'
+            IF @PhysicalOnly = 'N' SET @sqlcmd = @sqlcmd + ', DATA_PURITY'
+            IF @PhysicalOnly = 'Y' SET @sqlcmd = @sqlcmd + ', PHYSICAL_ONLY'
+            IF @MaxDOP IS NOT NULL SET @sqlcmd = @sqlcmd + ', MAXDOP = ' + CAST(@MaxDOP AS nvarchar)
 
             --Log the command
             -- INSERT INTO dbo.CommandsRun (command, object)

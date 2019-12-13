@@ -22,4 +22,8 @@ These are very similar to Ola's parameters, as the logic was taken from there an
 | ALL_DATABASES, -%Db%                          | All databases that do not have “Db” in the name |
 
 **@TimeLimit** - The time, in seconds, after which no commands are executed.  Default is unlimited <br>
-**@SnapshotPath** - Specify the location Database Snapshots should be stored during execution.  Default is the same location as the individual datafiles
+**@SnapshotPath** - Specify the location Database Snapshots should be stored during execution.  Default is the same location as the individual datafiles <br>
+**@LogToTable** - (Y,N) Log commands to the table dbo.CommandLog <br>
+**@Execute** - (Y,N) Execute the commands.  If 'N' then only print commands. <br>
+**@PhysicalOnly** - (Y,N) The PhysicalOnly option in DatabaseIntegrityCheck uses the PHYSICAL_ONLY option in the SQL Server [DBCC CHECKDB](https://docs.microsoft.com/en-us/sql/t-sql/database-console-commands/dbcc-checkdb-transact-sql), [DBCC CHECKFILEGROUP](https://docs.microsoft.com/en-us/sql/t-sql/database-console-commands/dbcc-checkfilegroup-transact-sql), and [DBCC CHECKTABLE](https://docs.microsoft.com/en-us/sql/t-sql/database-console-commands/dbcc-checktable-transact-sql) commands. <br>
+**@MaxDop** - Specify the number of CPUs to use when checking the database, filegroup or table. If this number is not specified, the global maximum degree of parallelism is used.  The MaxDOP option in DatabaseIntegrityCheck uses the MAXDOP option in the SQL Server [DBCC CHECKDB](https://docs.microsoft.com/en-us/sql/t-sql/database-console-commands/dbcc-checkdb-transact-sql), [DBCC CHECKFILEGROUP](https://docs.microsoft.com/en-us/sql/t-sql/database-console-commands/dbcc-checkfilegroup-transact-sql), and [DBCC CHECKTABLE](https://docs.microsoft.com/en-us/sql/t-sql/database-console-commands/dbcc-checktable-transact-sql) commands. <br>
