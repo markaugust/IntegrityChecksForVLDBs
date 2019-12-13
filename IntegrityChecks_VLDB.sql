@@ -1,22 +1,25 @@
 /*
 1. Create Table for holding info
-2. Create Database Snapshot
+2. Create Database Snapshot for each database as it loops through
 3. DBCC CHECKALLOC on all databases
 4. DBCC CHECKCATALOG on all databases
-5. DBCC CHECKTABLE on each table
-
-Need to figure out logic for if snapshot is not created, what to run checks against
-
+5. Drop Database Snapshot
+6. Create Database Snapshot for each database as it loops through
+7. DBCC CHECKTABLE on each table
+8. Drop Database Snapshot
 */
 SET NOCOUNT ON
 GO
 use master
 go
 
-DECLARE @TimeLimit int = 15
+DECLARE @TimeLimit int = NULL
 DECLARE @Databases nvarchar(max) = NULL
 DECLARE @SnapshotPath nvarchar(300) = NULL
 --DECLARE @PhysicalOnly nvarchar(1) = 'N'
+
+IF @Databases IS NULL
+    SET @Databases = 'ALL_DATABASES'
 
 --DROP TABLE dbo.tblObjects
 
@@ -87,8 +90,6 @@ DECLARE @checkTableDbOrder TABLE (
 -----------------------------------------------------------------
 ----------BUILD LIST OF DATABASES AND OBJECTS--------------------
 -----------------------------------------------------------------
-IF @Databases IS NULL
-    SET @Databases = 'ALL_DATABASES'
 
 --below is from Ola's scripts and how he compiles the list of databases
 
