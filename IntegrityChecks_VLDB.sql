@@ -13,10 +13,16 @@ GO
 use master
 go
 
-DECLARE @TimeLimit int = NULL
-DECLARE @Databases nvarchar(max) = NULL
-DECLARE @SnapshotPath nvarchar(300) = NULL
---DECLARE @PhysicalOnly nvarchar(1) = 'N'
+--These will be the SP Parameters
+DECLARE
+    @TimeLimit int = NULL,
+    @Databases nvarchar(max) = NULL,
+    @SnapshotPath nvarchar(300) = NULL,
+    @LogToTable nvarchar(max) = 'Y',
+    @Execute nvarchar(max) = 'Y'
+    --DECLARE @PhysicalOnly nvarchar(1) = 'N'
+
+----------
 
 IF @Databases IS NULL
     SET @Databases = 'ALL_DATABASES'
@@ -379,15 +385,17 @@ BEGIN
 
     --Run CheckAlloc
     SET @sqlcmd = 'DBCC CHECKALLOC([' + @checkDbName + ']) WITH NO_INFOMSGS, ALL_ERRORMSGS'
-    EXEC sp_executesql @sqlcmd
-    INSERT INTO dbo.CommandsRun (command, object)
-    SELECT @sqlcmd, @checkDbName
+    EXECUTE [dbo].[CommandExecute] @Command = @sqlcmd, @CommandType = 'Marks Custom CheckAlloc', @Mode = 1, @DatabaseName = @checkDbName, @LogToTable = @LogToTable, @Execute = @Execute
+    -- EXEC sp_executesql @sqlcmd
+    -- INSERT INTO dbo.CommandsRun (command, object)
+    -- SELECT @sqlcmd, @checkDbName
 
     --Run CheckCatalog
     SET @sqlcmd = 'DBCC CHECKCATALOG([' + @checkDbName + ']) WITH NO_INFOMSGS'
-    EXEC sp_executesql @sqlcmd
-    INSERT INTO dbo.CommandsRun (command, object)
-    SELECT @sqlcmd, @checkDbName
+    EXECUTE [dbo].[CommandExecute] @Command = @sqlcmd, @CommandType = 'Marks Custom CheckCatalog', @Mode = 1, @DatabaseName = @checkDbName, @LogToTable = @LogToTable, @Execute = @Execute
+    -- EXEC sp_executesql @sqlcmd
+    -- INSERT INTO dbo.CommandsRun (command, object)
+    -- SELECT @sqlcmd, @checkDbName
 
     --Drop Database Snapshot if one was created manually
     IF @snapCreated = 1
@@ -410,7 +418,7 @@ END
 
 INSERT INTO @checkTableDbOrder ([name], [dbid], [dbtype], [MinLastCheckDate], [isDone])
 SELECT [database_name], [dbid], [dbtype], min([LastCheckDate]), 0
-FROM tblObjects GROUP BY [database_name], [dbid]
+FROM tblObjects GROUP BY [database_name], [dbid], [dbtype]
 
 DECLARE @InitialRunCheck bit = 0
 DECLARE @OrderBySmallest bit = 0
@@ -442,11 +450,11 @@ BEGIN
     IF NOT (@hasMemOptFG = 1 OR @dbtype = 'S')
     BEGIN
         --Build and execute create snapshot statement
-        SET @snapName = @dbname + '_CHKALOCCAT_snapshot_' + CONVERT(nvarchar, @JobStartTime, 112)
+        SET @snapName = @dbname + '_CHKTABLE_snapshot_' + CONVERT(nvarchar, @JobStartTime, 112)
         SET @sqlcmd = 'CREATE DATABASE ' + QUOTENAME(@snapName) + ' ON '
         SELECT @sqlcmd = @sqlcmd + '(Name = ' + QUOTENAME(name) + ', Filename = '''
             + CASE WHEN @SnapshotPath IS NULL THEN physical_name ELSE @SnapshotPath + '\' + name END
-            + '_CHKALOCCAT_snapshot_' + CONVERT(nvarchar, @JobStartTime, 112) + '''),'
+            + '_CHKTABLE_snapshot_' + CONVERT(nvarchar, @JobStartTime, 112) + '''),'
         FROM sys.master_files WHERE database_id = @dbid AND type = 0
         SET @sqlcmd = LEFT(@sqlcmd, LEN(@sqlcmd) - 1)
         SET @sqlcmd = @sqlcmd + ' AS SNAPSHOT OF ' + QUOTENAME(@dbname)
@@ -508,10 +516,11 @@ BEGIN
             SET @sqlcmd = 'USE [' + @checkDbName + ']; DBCC CHECKTABLE (''' + @schemaname + '.' + @tablename + ''') WITH NO_INFOMSGS, ALL_ERRORMSGS, DATA_PURITY'
 
             --Log the command
-            INSERT INTO dbo.CommandsRun (command, object)
-            SELECT @sqlcmd, QUOTENAME(@checkDbName) + '.' + QUOTENAME(@schemaname) + '.' + QUOTENAME(@tablename)
-            --Execute the command
-            EXEC sp_executesql @sqlcmd
+            -- INSERT INTO dbo.CommandsRun (command, object)
+            -- SELECT @sqlcmd, QUOTENAME(@checkDbName) + '.' + QUOTENAME(@schemaname) + '.' + QUOTENAME(@tablename)
+            -- --Execute the command
+            -- EXEC sp_executesql @sqlcmd
+            EXECUTE [dbo].[CommandExecute] @Command = @sqlcmd, @CommandType = 'Marks Custom CheckTable', @Mode = 1, @DatabaseName = @checkDbName, @SchemaName = @schemaname, @ObjectName = @tablename, @ObjectType = NULL, @LogToTable = @LogToTable, @Execute = @Execute
 
             --Set End Time and last check date
             SET @cmdEndTime = GETDATE()
