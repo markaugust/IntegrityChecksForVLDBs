@@ -61,11 +61,13 @@ CREATE TABLE dbo.tblObjects(
 
 DECLARE @JobStartTime datetime = GETDATE()
 DECLARE @JobEndTime datetime = DATEADD(SS, @TimeLimit, @JobStartTime)
+DECLARE @Version numeric(18,10) = CAST(LEFT(CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(max)),CHARINDEX('.',CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(max))) - 1) + '.' + REPLACE(RIGHT(CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(max)), LEN(CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(max))) - CHARINDEX('.',CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(max)))),'.','') AS numeric(18,10))
 
 DECLARE @dbname sysname, @dbid int, @dbtype nvarchar(max), @tablename sysname, @schemaname sysname, @sqlcmd nvarchar(max), @avgRun int, @command nvarchar(max)
 DECLARE @previousRunDate datetime, @prevousRunDuration_MS int, @cmdStartTime datetime, @cmdEndTime datetime
 DECLARE @origExecutionCount int, @newRunDuration int, @newExecutionCount int, @lastCheckDate date
 DECLARE @hasMemOptFG bit, @snapName nvarchar(128), @snapCreated bit, @checkDbName sysname
+DECLARE @EndMessage nvarchar(max)
 
 --Declare table variables to gather info
 DECLARE @tblDBs TABLE (
@@ -112,6 +114,91 @@ SET @Error = 0
 SET @ReturnCode = 0
 
 SET @EmptyLine = CHAR(9)
+----------------------------------------------------------------------------------------------------
+--// Check core requirements                                                                    //--
+----------------------------------------------------------------------------------------------------
+
+IF NOT (SELECT [compatibility_level] FROM sys.databases WHERE database_id = DB_ID()) >= 90
+BEGIN
+    SET @ErrorMessage = 'The database ' + QUOTENAME(DB_NAME(DB_ID())) + ' has to be in compatibility level 90 or higher.'
+    RAISERROR('%s',16,1,@ErrorMessage) WITH NOWAIT
+    SET @Error = @@ERROR
+    RAISERROR(@EmptyLine,10,1) WITH NOWAIT
+END
+
+IF NOT (SELECT uses_ansi_nulls FROM sys.sql_modules WHERE [object_id] = @@PROCID) = 1
+BEGIN
+    SET @ErrorMessage = 'ANSI_NULLS has to be set to ON for the stored procedure.'
+    RAISERROR('%s',16,1,@ErrorMessage) WITH NOWAIT
+    SET @Error = @@ERROR
+    RAISERROR(@EmptyLine,10,1) WITH NOWAIT
+END
+
+IF NOT (SELECT uses_quoted_identifier FROM sys.sql_modules WHERE [object_id] = @@PROCID) = 1
+BEGIN
+    SET @ErrorMessage = 'QUOTED_IDENTIFIER has to be set to ON for the stored procedure.'
+    RAISERROR('%s',16,1,@ErrorMessage) WITH NOWAIT
+    SET @Error = @@ERROR
+    RAISERROR(@EmptyLine,10,1) WITH NOWAIT
+END
+
+IF NOT EXISTS (SELECT * FROM sys.objects objects INNER JOIN sys.schemas schemas ON objects.[schema_id] = schemas.[schema_id] WHERE objects.[type] = 'P' AND schemas.[name] = 'dbo' AND objects.[name] = 'CommandExecute')
+BEGIN
+    SET @ErrorMessage = 'The stored procedure CommandExecute is missing. Download https://ola.hallengren.com/scripts/CommandExecute.sql.'
+    RAISERROR('%s',16,1,@ErrorMessage) WITH NOWAIT
+    SET @Error = @@ERROR
+    RAISERROR(@EmptyLine,10,1) WITH NOWAIT
+END
+
+IF EXISTS (SELECT * FROM sys.objects objects INNER JOIN sys.schemas schemas ON objects.[schema_id] = schemas.[schema_id] WHERE objects.[type] = 'P' AND schemas.[name] = 'dbo' AND objects.[name] = 'CommandExecute' AND OBJECT_DEFINITION(objects.[object_id]) NOT LIKE '%@LockMessageSeverity%')
+BEGIN
+    SET @ErrorMessage = 'The stored procedure CommandExecute needs to be updated. Download https://ola.hallengren.com/scripts/CommandExecute.sql.'
+    RAISERROR('%s',16,1,@ErrorMessage) WITH NOWAIT
+    SET @Error = @@ERROR
+    RAISERROR(@EmptyLine,10,1) WITH NOWAIT
+END
+
+IF @LogToTable = 'Y' AND NOT EXISTS (SELECT * FROM sys.objects objects INNER JOIN sys.schemas schemas ON objects.[schema_id] = schemas.[schema_id] WHERE objects.[type] = 'U' AND schemas.[name] = 'dbo' AND objects.[name] = 'CommandLog')
+BEGIN
+    SET @ErrorMessage = 'The table CommandLog is missing. Download https://ola.hallengren.com/scripts/CommandLog.sql.'
+    RAISERROR('%s',16,1,@ErrorMessage) WITH NOWAIT
+    SET @Error = @@ERROR
+    RAISERROR(@EmptyLine,10,1) WITH NOWAIT
+END
+
+-- IF @DatabasesInParallel = 'Y' AND NOT EXISTS (SELECT * FROM sys.objects objects INNER JOIN sys.schemas schemas ON objects.[schema_id] = schemas.[schema_id] WHERE objects.[type] = 'U' AND schemas.[name] = 'dbo' AND objects.[name] = 'Queue')
+-- BEGIN
+--     SET @ErrorMessage = 'The table Queue is missing. Download https://ola.hallengren.com/scripts/Queue.sql.'
+--     RAISERROR('%s',16,1,@ErrorMessage) WITH NOWAIT
+--     SET @Error = @@ERROR
+--     RAISERROR(@EmptyLine,10,1) WITH NOWAIT
+-- END
+
+-- IF @DatabasesInParallel = 'Y' AND NOT EXISTS (SELECT * FROM sys.objects objects INNER JOIN sys.schemas schemas ON objects.[schema_id] = schemas.[schema_id] WHERE objects.[type] = 'U' AND schemas.[name] = 'dbo' AND objects.[name] = 'QueueDatabase')
+-- BEGIN
+--     SET @ErrorMessage = 'The table QueueDatabase is missing. Download https://ola.hallengren.com/scripts/QueueDatabase.sql.'
+--     RAISERROR('%s',16,1,@ErrorMessage) WITH NOWAIT
+--     SET @Error = @@ERROR
+--     RAISERROR(@EmptyLine,10,1) WITH NOWAIT
+-- END
+
+IF @@TRANCOUNT <> 0
+BEGIN
+    SET @ErrorMessage = 'The transaction count is not 0.'
+    RAISERROR('%s',16,1,@ErrorMessage) WITH NOWAIT
+    SET @Error = @@ERROR
+    RAISERROR(@EmptyLine,10,1) WITH NOWAIT
+END
+
+IF @Error <> 0
+    BEGIN
+    SET @ReturnCode = @Error
+    GOTO Logging
+END
+
+----------------------------------------------------------------------------------------------------
+--// Select databases                                                                           //--
+----------------------------------------------------------------------------------------------------
 
 DECLARE @SelectedDatabases TABLE (DatabaseName nvarchar(max),
                                 DatabaseType nvarchar(max),
@@ -274,15 +361,17 @@ BEGIN
     END
 
     --This query is derived and taken from the MS Tiger Scripts
-    --This is where you would adjust what tables you want to select
+    --This is where you would adjust what tables you want to select and what information to pull
     SET @sqlcmd = 'SELECT ''' + @dbname + ''' as database_name, ' + CAST(@dbid as varchar) + ' as dbid, ''' + @dbtype + ''' as dbtype, 
     so.[object_id], so.[name], ss.name, so.[type], so.type_desc, SUM(sps.used_page_count) AS used_page_count
     FROM [' + @dbname + '].sys.objects so
     INNER JOIN [' + @dbname + '].sys.dm_db_partition_stats sps ON so.[object_id] = sps.[object_id]
     INNER JOIN [' + @dbname + '].sys.indexes si ON so.[object_id] = si.[object_id]
-    INNER JOIN [' + @dbname + '].sys.schemas ss ON so.[schema_id] = ss.[schema_id] 
-    WHERE so.[type] IN (''S'', ''U'', ''V'')
-    GROUP BY so.[object_id], so.[name], ss.name, so.[type], so.type_desc'
+    INNER JOIN [' + @dbname + '].sys.schemas ss ON so.[schema_id] = ss.[schema_id]
+    LEFT JOIN [' + @dbname + '].sys.tables st ON so.[object_id] = st.[object_id]
+    WHERE so.[type] IN (''S'', ''U'', ''V'')'
+    + CASE WHEN @Version >= 12 THEN ' AND (st.is_memory_optimized = 0 OR st.is_memory_optimized IS NULL)' ELSE '' END
+    + 'GROUP BY so.[object_id], so.[name], ss.name, so.[type], so.type_desc'
 
     INSERT INTO @tblObj
     EXEC sp_executesql @sqlcmd
@@ -331,12 +420,12 @@ WHEN NOT MATCHED BY SOURCE THEN
 
 --For Testing Only--------------
 --DROP TABLE dbo.CommandsRun
-IF NOT EXISTS (SELECT 1 FROM sys.objects where object_id = OBJECT_ID(N'[dbo].[CommandsRun]') and type in (N'U'))
-CREATE TABLE dbo.CommandsRun(
-    [command] nvarchar(max),
-    [object] nvarchar(max)
-)
-TRUNCATE TABLE dbo.CommandsRun
+-- IF NOT EXISTS (SELECT 1 FROM sys.objects where object_id = OBJECT_ID(N'[dbo].[CommandsRun]') and type in (N'U'))
+-- CREATE TABLE dbo.CommandsRun(
+--     [command] nvarchar(max),
+--     [object] nvarchar(max)
+-- )
+-- TRUNCATE TABLE dbo.CommandsRun
 ----------------------------------
 
 -----------------------------------------------------------------
@@ -571,6 +660,27 @@ END
 -----------------------------------------------------------------
 ----------DONE---------------------------------------------------
 -----------------------------------------------------------------
+
+----------------------------------------------------------------------------------------------------
+--// Log completing information                                                                 //--
+----------------------------------------------------------------------------------------------------
+
+Logging:
+SET @EndMessage = 'Date and time: ' + CONVERT(nvarchar,GETDATE(),120)
+RAISERROR('%s',10,1,@EndMessage) WITH NOWAIT
+
+RAISERROR(@EmptyLine,10,1) WITH NOWAIT
+
+IF @ReturnCode <> 0
+BEGIN
+    RETURN @ReturnCode
+END
+
+
+-----------------------------------------------------------------
+----------END----------------------------------------------------
+-----------------------------------------------------------------
+
 
 select *
 from tblObjects
