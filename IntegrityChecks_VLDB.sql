@@ -1,21 +1,25 @@
 /*
 1. Create Table for holding info
-2. Create Database Snapshot (not implemented yet)
+2. Create Database Snapshot for each database as it loops through
 3. DBCC CHECKALLOC on all databases
 4. DBCC CHECKCATALOG on all databases
-5. DBCC CHECKTABLE on each table
-
-Parallel table checks?
-
+5. Drop Database Snapshot
+6. Create Database Snapshot for each database as it loops through
+7. DBCC CHECKTABLE on each table
+8. Drop Database Snapshot
 */
 SET NOCOUNT ON
 GO
 use master
 go
 
-DECLARE @TimeLimit int = 15
+DECLARE @TimeLimit int = NULL
 DECLARE @Databases nvarchar(max) = NULL
+DECLARE @SnapshotPath nvarchar(300) = NULL
 --DECLARE @PhysicalOnly nvarchar(1) = 'N'
+
+IF @Databases IS NULL
+    SET @Databases = 'ALL_DATABASES'
 
 --DROP TABLE dbo.tblObjects
 
@@ -25,6 +29,7 @@ IF NOT EXISTS (SELECT 1 FROM sys.objects where object_id = OBJECT_ID(N'[dbo].[tb
 CREATE TABLE dbo.tblObjects(
     [database_name] nvarchar(128),
     [dbid] int,
+    [dbtype] nvarchar(max),
     [object_id] int,
     [name] sysname,
     [schema] sysname,
@@ -50,19 +55,23 @@ CREATE TABLE dbo.tblObjects(
 
 DECLARE @JobStartTime datetime = GETDATE()
 DECLARE @JobEndTime datetime = DATEADD(SS, @TimeLimit, @JobStartTime)
-DECLARE @dbname sysname, @dbid int, @tablename sysname, @schemaname sysname, @sqlcmd nvarchar(max), @avgRun int, @command nvarchar(max)
+
+DECLARE @dbname sysname, @dbid int, @dbtype nvarchar(max), @tablename sysname, @schemaname sysname, @sqlcmd nvarchar(max), @avgRun int, @command nvarchar(max)
 DECLARE @previousRunDate datetime, @prevousRunDuration_MS int, @cmdStartTime datetime, @cmdEndTime datetime
 DECLARE @origExecutionCount int, @newRunDuration int, @newExecutionCount int, @lastCheckDate date
+DECLARE @hasMemOptFG bit, @snapName nvarchar(128), @snapCreated bit, @checkDbName sysname
 
 --Declare table variables to gather info
 DECLARE @tblDBs TABLE (
     [name] sysname,
     [dbid] int,
+    [dbtype] nvarchar(max),
     [isdone] bit
 )
 DECLARE @tblObj TABLE (
     [database_name] nvarchar(128),
     [dbid] int,
+    [dbtype] nvarchar(max),
     [object_id] int,
     [name] sysname,
     [schema] sysname,
@@ -73,6 +82,7 @@ DECLARE @tblObj TABLE (
 DECLARE @checkTableDbOrder TABLE (
     [name] sysname,
     [dbid] int,
+    [dbtype] nvarchar(max),
     [MinLastCheckDate] datetime,
     [isDone] bit
 )
@@ -81,18 +91,7 @@ DECLARE @checkTableDbOrder TABLE (
 ----------BUILD LIST OF DATABASES AND OBJECTS--------------------
 -----------------------------------------------------------------
 
---Get names of databases and track for loop
---This is where you would adjust what databases you want to check
--- INSERT INTO @tblDBs (name, dbid, isdone)
--- SELECT name, database_id, 0 as isdone
--- FROM sys.databases
--- WHERE is_read_only = 0 --only databases that are READ_WRITE
--- AND state = 0 --only databases that are ONLINE
--- AND database_id <> 2 --exclude tempdb
--- AND name IN ('StackOverflow2010','AdventureWorks2017') --for testing
-
-IF @Databases IS NULL
-    SET @Databases = 'ALL_DATABASES'
+--below is from Ola's scripts and how he compiles the list of databases
 
 -----------------------------------------------------------------
 ----------vvvv LOVINGLY STOLEN FROM OLA vvvv---------------------
@@ -216,7 +215,7 @@ AND (tmpDatabases.AvailabilityGroup = SelectedDatabases.AvailabilityGroup OR Sel
 AND NOT ((tmpDatabases.DatabaseName = 'tempdb' OR tmpDatabases.[Snapshot] = 1) AND tmpDatabases.DatabaseName <> SelectedDatabases.DatabaseName)
 WHERE SelectedDatabases.Selected = 0
 
---Update Start Position
+--Update Start Position (for ordering)
 UPDATE tmpDatabases
 SET tmpDatabases.StartPosition = SelectedDatabases2.StartPosition
 FROM @tmpDatabases tmpDatabases
@@ -250,15 +249,19 @@ SET [Order] = RowNumber
 ----------^^^^ LOVINGLY STOLEN FROM OLA ^^^^---------------------
 -----------------------------------------------------------------
 
-INSERT INTO @tblDBs (name, dbid, isdone)
-SELECT DatabaseName, ID, 0 as isdone
+-----------------------------------------------------------------
+----------GENERATE LIST OF OBJECTS TO BE CHECKED-----------------
+-----------------------------------------------------------------
+--Take ouput of the Ola section and put it into our own table
+INSERT INTO @tblDBs (name, dbid, dbtype, isdone)
+SELECT DatabaseName, DB_ID(DatabaseName), DatabaseType, 0 as isdone
 FROM @tmpDatabases
 WHERE Selected = 1
 
 --loop through all databases gathered and get page count for each table in the database
 WHILE 1=1
 BEGIN
-    SELECT TOP 1 @dbname = name, @dbid = dbid FROM @tblDBs WHERE isdone = 0
+    SELECT TOP 1 @dbname = name, @dbid = dbid, @dbtype = dbtype FROM @tblDBs WHERE isdone = 0
     IF @@ROWCOUNT = 0
     BEGIN
         BREAK
@@ -266,7 +269,7 @@ BEGIN
 
     --This query is derived and taken from the MS Tiger Scripts
     --This is where you would adjust what tables you want to select
-    SET @sqlcmd = 'SELECT ''' + @dbname + ''' as database_name, ' + CAST(@dbid as varchar) + ' as dbid,
+    SET @sqlcmd = 'SELECT ''' + @dbname + ''' as database_name, ' + CAST(@dbid as varchar) + ' as dbid, ''' + @dbtype + ''' as dbtype, 
     so.[object_id], so.[name], ss.name, so.[type], so.type_desc, SUM(sps.used_page_count) AS used_page_count
     FROM [' + @dbname + '].sys.objects so
     INNER JOIN [' + @dbname + '].sys.dm_db_partition_stats sps ON so.[object_id] = sps.[object_id]
@@ -292,11 +295,12 @@ END
 MERGE master.dbo.tblObjects as [Target]
 USING (SELECT * FROM @tblObj) as [Source]
 ON (Target.database_name = Source.database_name AND Target.[schema] = Source.[schema] AND Target.name = Source.name)
-WHEN MATCHED AND Target.used_page_count <> source.used_page_count THEN
+WHEN MATCHED /*AND Target.used_page_count <> source.used_page_count */ THEN
     UPDATE SET Target.used_page_count = source.used_page_count, Target.Active = 1
 WHEN NOT MATCHED BY TARGET THEN
     INSERT ([database_name]
       ,[dbid]
+      ,[dbtype]
       ,[object_id]
       ,[name]
       ,[schema]
@@ -306,6 +310,7 @@ WHEN NOT MATCHED BY TARGET THEN
       ,[Active])
     VALUES (Source.[database_name]
       ,Source.[dbid]
+      ,Source.[dbtype]
       ,Source.[object_id]
       ,Source.[name]
       ,Source.[schema]
@@ -318,10 +323,6 @@ WHEN NOT MATCHED BY SOURCE THEN
     UPDATE SET Active = 0
 ;
 
------------------------------------------------------------------
-----------RUN CHECKALLOC AND CHECKCATALOG------------------------
------------------------------------------------------------------
-
 --For Testing Only--------------
 --DROP TABLE dbo.CommandsRun
 IF NOT EXISTS (SELECT 1 FROM sys.objects where object_id = OBJECT_ID(N'[dbo].[CommandsRun]') and type in (N'U'))
@@ -332,6 +333,10 @@ CREATE TABLE dbo.CommandsRun(
 TRUNCATE TABLE dbo.CommandsRun
 ----------------------------------
 
+-----------------------------------------------------------------
+----------RUN CHECKALLOC AND CHECKCATALOG------------------------
+-----------------------------------------------------------------
+
 --Reset DB status for CheckAlloc and CheckCatalog
 UPDATE @tblDBs
 SET isdone = 0
@@ -339,21 +344,59 @@ SET isdone = 0
 --loop through all databases in @tblDBs and run CheckAlloc and CheckCatalog
 WHILE (GETDATE() < @JobEndTime OR @TimeLimit IS NULL)
 BEGIN
-    SELECT TOP 1 @dbname = name, @dbid = dbid from @tblDBs where isdone = 0
+    SELECT TOP 1 @dbname = [name], @dbid = [dbid], @dbtype = [dbtype] from @tblDBs where isdone = 0
     IF @@ROWCOUNT = 0
     BEGIN
         BREAK
     END
 
-    SET @sqlcmd = 'DBCC CHECKALLOC(' + CAST(@dbid as varchar) + ') WITH NO_INFOMSGS, ALL_ERRORMSGS'
-    EXEC sp_executesql @sqlcmd
-    INSERT INTO dbo.CommandsRun (command, object)
-    SELECT @sqlcmd, @dbname
+    SET @snapCreated = 0
+    SET @checkDbName = @dbname
+    --Check if database has MemOptFG
+    SET @sqlcmd = 'IF EXISTS (SELECT 1 from ' + QUOTENAME(@dbname) + '.sys.filegroups where type = ''FX'') BEGIN SET @currentHasMemOptFG = 1 END ELSE BEGIN SET @currentHasMemOptFG = 0 END'
+    exec sp_executesql @statement = @sqlcmd, @params = N'@currentHasMemOptFG bit OUTPUT', @currentHasMemOptFG = @hasMemOptFG output
+    --if it's not MemOptFG and not a System DB, Create manual snapshot
+    IF NOT (@hasMemOptFG = 1 OR @dbtype = 'S')
+    BEGIN
+        --Build and execute create snapshot statement
+        SET @snapName = @dbname + '_CHKALOCCAT_snapshot_' + CONVERT(nvarchar, @JobStartTime, 112)
+        SET @sqlcmd = 'CREATE DATABASE ' + QUOTENAME(@snapName) + ' ON '
+        SELECT @sqlcmd = @sqlcmd + '(Name = ' + QUOTENAME(name) + ', Filename = '''
+            + CASE WHEN @SnapshotPath IS NULL THEN physical_name ELSE @SnapshotPath + '\' + name END
+            + '_CHKALOCCAT_snapshot_' + CONVERT(nvarchar, @JobStartTime, 112) + '''),'
+        FROM sys.master_files WHERE database_id = @dbid AND type = 0
+        SET @sqlcmd = LEFT(@sqlcmd, LEN(@sqlcmd) - 1)
+        SET @sqlcmd = @sqlcmd + ' AS SNAPSHOT OF ' + QUOTENAME(@dbname)
+        EXEC sp_executesql @sqlcmd
+        SET @snapCreated = 1
+    END
 
-    SET @sqlcmd = 'DBCC CHECKCATALOG(' + CAST(@dbid as varchar) + ') WITH NO_INFOMSGS'
+    --if snapshot is created, use snapshot name for database name
+    IF @snapCreated = 1
+    BEGIN
+        SET @checkDbName = @snapName
+    END
+
+    --Run CheckAlloc
+    SET @sqlcmd = 'DBCC CHECKALLOC([' + @checkDbName + ']) WITH NO_INFOMSGS, ALL_ERRORMSGS'
     EXEC sp_executesql @sqlcmd
     INSERT INTO dbo.CommandsRun (command, object)
-    SELECT @sqlcmd, @dbname
+    SELECT @sqlcmd, @checkDbName
+
+    --Run CheckCatalog
+    SET @sqlcmd = 'DBCC CHECKCATALOG([' + @checkDbName + ']) WITH NO_INFOMSGS'
+    EXEC sp_executesql @sqlcmd
+    INSERT INTO dbo.CommandsRun (command, object)
+    SELECT @sqlcmd, @checkDbName
+
+    --Drop Database Snapshot if one was created manually
+    IF @snapCreated = 1
+    BEGIN
+        SET @sqlcmd = 'IF EXISTS (SELECT name FROM sys.databases WHERE name = ''' + @checkDbName
+            + ''') AND (SELECT source_database_id FROM sys.databases WHERE name = ''' + @checkDbName
+            + ''') IS NOT NULL BEGIN DROP DATABASE ' + QUOTENAME(@checkDbName) + 'END'
+        EXEC sp_executesql @sqlcmd
+    END
 
     --update loop counter
     UPDATE @tblDBs
@@ -365,8 +408,8 @@ END
 ----------RUN CHECKTABLE-----------------------------------------
 -----------------------------------------------------------------
 
-INSERT INTO @checkTableDbOrder ([name], [dbid], [MinLastCheckDate], [isDone])
-SELECT [database_name], [dbid], min([LastCheckDate]), 0
+INSERT INTO @checkTableDbOrder ([name], [dbid], [dbtype], [MinLastCheckDate], [isDone])
+SELECT [database_name], [dbid], [dbtype], min([LastCheckDate]), 0
 FROM tblObjects GROUP BY [database_name], [dbid]
 
 DECLARE @InitialRunCheck bit = 0
@@ -375,7 +418,7 @@ DECLARE @OrderBySmallest bit = 0
 WHILE (GETDATE() < @JobEndTime OR @TimeLimit IS NULL)
 BEGIN
     --Ensures only 1 database is checked at a time, rather than randomly checking tables from random databases
-    SELECT TOP 1 @dbname = [name] from @checkTableDbOrder WHERE isDone = 0 ORDER BY MinLastCheckDate
+    SELECT TOP 1 @dbname = [name], @dbid = [dbid], @dbtype = [dbtype] from @checkTableDbOrder WHERE isDone = 0 ORDER BY MinLastCheckDate
     --This will break the loop if all databases are done before the time limit
     IF @@ROWCOUNT = 0
     BEGIN
@@ -385,6 +428,37 @@ BEGIN
     --if the number of new tables (execution count = 0) is greater than existing (execution count > 0)
     IF (SELECT count([database_name]) from tblObjects WHERE @dbname = [database_name] and NumberOfExecutions = 0) > (SELECT count([database_name]) from tblObjects WHERE @dbname = [database_name] and NumberOfExecutions > 0)
         SET @InitialRunCheck = 1
+
+
+
+
+    --Create Snapshot
+    SET @snapCreated = 0
+    SET @checkDbName = @dbname
+    --Check if database has MemOptFG
+    SET @sqlcmd = 'IF EXISTS (SELECT 1 from ' + QUOTENAME(@dbname) + '.sys.filegroups where type = ''FX'') BEGIN SET @currentHasMemOptFG = 1 END ELSE BEGIN SET @currentHasMemOptFG = 0 END'
+    exec sp_executesql @statement = @sqlcmd, @params = N'@currentHasMemOptFG bit OUTPUT', @currentHasMemOptFG = @hasMemOptFG output
+    --if it's not MemOptFG and not a System DB, Create manual snapshot
+    IF NOT (@hasMemOptFG = 1 OR @dbtype = 'S')
+    BEGIN
+        --Build and execute create snapshot statement
+        SET @snapName = @dbname + '_CHKALOCCAT_snapshot_' + CONVERT(nvarchar, @JobStartTime, 112)
+        SET @sqlcmd = 'CREATE DATABASE ' + QUOTENAME(@snapName) + ' ON '
+        SELECT @sqlcmd = @sqlcmd + '(Name = ' + QUOTENAME(name) + ', Filename = '''
+            + CASE WHEN @SnapshotPath IS NULL THEN physical_name ELSE @SnapshotPath + '\' + name END
+            + '_CHKALOCCAT_snapshot_' + CONVERT(nvarchar, @JobStartTime, 112) + '''),'
+        FROM sys.master_files WHERE database_id = @dbid AND type = 0
+        SET @sqlcmd = LEFT(@sqlcmd, LEN(@sqlcmd) - 1)
+        SET @sqlcmd = @sqlcmd + ' AS SNAPSHOT OF ' + QUOTENAME(@dbname)
+        EXEC sp_executesql @sqlcmd
+        SET @snapCreated = 1
+    END
+    --if snapshot is created, use snapshot name for database name
+    IF @snapCreated = 1
+    BEGIN
+        SET @checkDbName = @snapName
+    END
+
 
     --Run the CheckTable commands
     WHILE (GETDATE() < @JobEndTime OR @TimeLimit IS NULL)
@@ -431,11 +505,11 @@ BEGIN
         ELSE
         BEGIN
             SET @cmdStartTime = GETDATE()
-            SET @sqlcmd = 'USE [' + @dbname + ']; DBCC CHECKTABLE (''' + @schemaname + '.' + @tablename + ''') WITH NO_INFOMSGS, ALL_ERRORMSGS, DATA_PURITY'
+            SET @sqlcmd = 'USE [' + @checkDbName + ']; DBCC CHECKTABLE (''' + @schemaname + '.' + @tablename + ''') WITH NO_INFOMSGS, ALL_ERRORMSGS, DATA_PURITY'
 
             --Log the command
             INSERT INTO dbo.CommandsRun (command, object)
-            SELECT @sqlcmd, QUOTENAME(@dbname) + '.' + QUOTENAME(@schemaname) + '.' + QUOTENAME(@tablename)
+            SELECT @sqlcmd, QUOTENAME(@checkDbName) + '.' + QUOTENAME(@schemaname) + '.' + QUOTENAME(@tablename)
             --Execute the command
             EXEC sp_executesql @sqlcmd
 
@@ -469,6 +543,17 @@ BEGIN
 
     END
 
+
+    --Drop Snapshot
+    --Drop Database Snapshot if one was created manually
+    IF @snapCreated = 1
+    BEGIN
+        SET @sqlcmd = 'IF EXISTS (SELECT name FROM sys.databases WHERE name = ''' + @checkDbName
+            + ''') AND (SELECT source_database_id FROM sys.databases WHERE name = ''' + @checkDbName
+            + ''') IS NOT NULL BEGIN DROP DATABASE ' + QUOTENAME(@checkDbName) + 'END'
+        EXEC sp_executesql @sqlcmd
+    END
+
     UPDATE @checkTableDbOrder
     SET isDone = 1
     WHERE name = @dbname
@@ -485,6 +570,11 @@ order by StartTime desc
 select *
 from CommandsRun
 order by object
+
+select * from @tmpDatabases
+select * from @tblDBs
+select * from @tblObj
+select * from @checkTableDbOrder
 
 --select SUM(RunDuration_MS)/1000
 --from tblObjects
