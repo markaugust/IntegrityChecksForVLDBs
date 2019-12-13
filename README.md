@@ -3,6 +3,7 @@ My solution to managing Integrity Checks within a time limit on a Very Large Dat
 
 
 ## Parameters:
+These are very similar to Ola's parameters, as the logic was taken from there and implemented here
 
 **@Databases** - Select databases. The keywords SYSTEM_DATABASES, USER_DATABASES, ALL_DATABASES, and AVAILABILITY_GROUP_DATABASES are supported. The hyphen character (-) is used to exclude databases, and the percent character (%) is used for wildcard selection. All of these operations can be combined by using the comma (,).<br>
 
