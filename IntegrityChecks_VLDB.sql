@@ -687,7 +687,7 @@ BEGIN
 
             --Set End Time and last check date
             SET @cmdEndTime = GETDATE()
-            SET @lastCheckDate = @cmdEndTime
+            SET @lastCheckDate = @JobStartTime
 
             --Set run duration of this run and the new execution count
             SET @newRunDuration = DATEDIFF(ms, @cmdStartTime, @cmdEndTime)
