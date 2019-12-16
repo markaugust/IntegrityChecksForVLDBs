@@ -1,4 +1,7 @@
 /*
+
+Uncomment return code at end when creating stored proc
+
 1. Create Table for holding info
 2. Create Database Snapshot for each database as it loops through
 3. DBCC CHECKALLOC on all databases
@@ -13,15 +16,16 @@ GO
 use master
 go
 
---These will be the SP Parameters
+--These will be the Stored Proc Parameters
 DECLARE
-    @TimeLimit int = NULL,
     @Databases nvarchar(max) = NULL,
+    @PhysicalOnly nvarchar(max) = 'N',
+    @MaxDOP int = NULL,
+    @TimeLimit int = NULL,
     @SnapshotPath nvarchar(300) = NULL,
     @LogToTable nvarchar(max) = 'Y',
-    @Execute nvarchar(max) = 'Y',
-    @PhysicalOnly nvarchar(1) = 'N',
-    @MaxDOP int = NULL
+    @Execute nvarchar(max) = 'Y'
+
 
 ----------
 
@@ -68,7 +72,7 @@ DECLARE @dbname sysname, @dbid int, @dbtype nvarchar(max), @tablename sysname, @
 DECLARE @previousRunDate datetime, @prevousRunDuration_MS int, @cmdStartTime datetime, @cmdEndTime datetime
 DECLARE @origExecutionCount int, @newRunDuration int, @newExecutionCount int, @lastCheckDate date
 DECLARE @hasMemOptFG bit, @snapName nvarchar(128), @snapCreated bit, @checkDbName sysname
-DECLARE @EndMessage nvarchar(max)
+DECLARE @EndMessage nvarchar(max), @DatabaseMessage nvarchar(max)
 
 --Declare table variables to gather info
 DECLARE @tblDBs TABLE (
@@ -438,7 +442,7 @@ END
 
 --Merge into persistent table
 --Match on database name, schema name, and table name
---When Match and page count is different, update page count in persistent table
+--When Match and page count is different, update page count in persistent table and set active flag
 --when not found in persistent table, insert
 --when found in persistent table but not in source, then delete from persistent table
 MERGE master.dbo.tblObjects as [Target]
@@ -468,7 +472,6 @@ WHEN NOT MATCHED BY TARGET THEN
       ,Source.[used_page_count]
       ,1)
 WHEN NOT MATCHED BY SOURCE THEN
-    --DELETE
     UPDATE SET Active = 0
 ;
 
@@ -524,18 +527,24 @@ BEGIN
     IF @snapCreated = 1
     BEGIN
         SET @checkDbName = @snapName
+
+        SET @DatabaseMessage = 'Snapshot created: ' + QUOTENAME(@snapName)
+        RAISERROR('%s',10,1,@DatabaseMessage) WITH NOWAIT
+        SET @DatabaseMessage = 'Command: ' + @sqlCmd
+        RAISERROR('%s',10,1,@DatabaseMessage) WITH NOWAIT
+        RAISERROR(@EmptyLine,10,1) WITH NOWAIT
     END
 
     --Run CheckAlloc
     SET @sqlcmd = 'DBCC CHECKALLOC([' + @checkDbName + ']) WITH NO_INFOMSGS, ALL_ERRORMSGS'
-    EXECUTE [dbo].[CommandExecute] @Command = @sqlcmd, @CommandType = 'Marks Custom CheckAlloc', @Mode = 1, @DatabaseName = @checkDbName, @LogToTable = @LogToTable, @Execute = @Execute
+    EXECUTE [dbo].[CommandExecute] @Command = @sqlcmd, @CommandType = 'Marks Custom CheckAlloc', @Mode = 1, @DatabaseName = @dbname, @LogToTable = @LogToTable, @Execute = @Execute
     -- EXEC sp_executesql @sqlcmd
     -- INSERT INTO dbo.CommandsRun (command, object)
     -- SELECT @sqlcmd, @checkDbName
 
     --Run CheckCatalog
     SET @sqlcmd = 'DBCC CHECKCATALOG([' + @checkDbName + ']) WITH NO_INFOMSGS'
-    EXECUTE [dbo].[CommandExecute] @Command = @sqlcmd, @CommandType = 'Marks Custom CheckCatalog', @Mode = 1, @DatabaseName = @checkDbName, @LogToTable = @LogToTable, @Execute = @Execute
+    EXECUTE [dbo].[CommandExecute] @Command = @sqlcmd, @CommandType = 'Marks Custom CheckCatalog', @Mode = 1, @DatabaseName = @dbname, @LogToTable = @LogToTable, @Execute = @Execute
     -- EXEC sp_executesql @sqlcmd
     -- INSERT INTO dbo.CommandsRun (command, object)
     -- SELECT @sqlcmd, @checkDbName
@@ -547,6 +556,10 @@ BEGIN
             + ''') AND (SELECT source_database_id FROM sys.databases WHERE name = ''' + @checkDbName
             + ''') IS NOT NULL BEGIN DROP DATABASE ' + QUOTENAME(@checkDbName) + 'END'
         EXEC sp_executesql @sqlcmd
+
+        SET @DatabaseMessage = 'Snapshot dropped: ' + QUOTENAME(@snapName)
+        RAISERROR('%s',10,1,@DatabaseMessage) WITH NOWAIT
+        RAISERROR(@EmptyLine,10,1) WITH NOWAIT
     END
 
     --update loop counter
@@ -561,7 +574,9 @@ END
 
 INSERT INTO @checkTableDbOrder ([name], [dbid], [dbtype], [MinLastCheckDate], [isDone])
 SELECT [database_name], [dbid], [dbtype], min([LastCheckDate]), 0
-FROM tblObjects GROUP BY [database_name], [dbid], [dbtype]
+FROM tblObjects
+WHERE Active = 1
+GROUP BY [database_name], [dbid], [dbtype]
 
 DECLARE @InitialRunCheck bit = 0
 DECLARE @OrderBySmallest bit = 0
@@ -608,6 +623,12 @@ BEGIN
     IF @snapCreated = 1
     BEGIN
         SET @checkDbName = @snapName
+
+        SET @DatabaseMessage = 'Snapshot created: ' + QUOTENAME(@snapName)
+        RAISERROR('%s',10,1,@DatabaseMessage) WITH NOWAIT
+        SET @DatabaseMessage = 'Command: ' + @sqlCmd
+        RAISERROR('%s',10,1,@DatabaseMessage) WITH NOWAIT
+        RAISERROR(@EmptyLine,10,1) WITH NOWAIT
     END
 
 
@@ -644,10 +665,6 @@ BEGIN
             BREAK
         END
 
-        /*  Add logic for if avgrun = 0 for first time runs
-        IF @avgRun = 0
-        */
-
         --If average run time is longer than remaining time + one minute to give a little overhead
         IF @TimeLimit IS NOT NULL AND DATEADD(MS, @avgRun, @cmdStartTime) > DATEADD(MI, 1, @JobEndTime)
         BEGIN
@@ -666,7 +683,7 @@ BEGIN
             -- SELECT @sqlcmd, QUOTENAME(@checkDbName) + '.' + QUOTENAME(@schemaname) + '.' + QUOTENAME(@tablename)
             -- --Execute the command
             -- EXEC sp_executesql @sqlcmd
-            EXECUTE [dbo].[CommandExecute] @Command = @sqlcmd, @CommandType = 'Marks Custom CheckTable', @Mode = 1, @DatabaseName = @checkDbName, @SchemaName = @schemaname, @ObjectName = @tablename, @ObjectType = NULL, @LogToTable = @LogToTable, @Execute = @Execute
+            EXECUTE [dbo].[CommandExecute] @Command = @sqlcmd, @CommandType = 'Marks Custom CheckTable', @Mode = 1, @DatabaseName = @dbname, @SchemaName = @schemaname, @ObjectName = @tablename, @ObjectType = NULL, @LogToTable = @LogToTable, @Execute = @Execute
 
             --Set End Time and last check date
             SET @cmdEndTime = GETDATE()
@@ -707,6 +724,10 @@ BEGIN
             + ''') AND (SELECT source_database_id FROM sys.databases WHERE name = ''' + @checkDbName
             + ''') IS NOT NULL BEGIN DROP DATABASE ' + QUOTENAME(@checkDbName) + 'END'
         EXEC sp_executesql @sqlcmd
+
+        SET @DatabaseMessage = 'Snapshot dropped: ' + QUOTENAME(@snapName)
+        RAISERROR('%s',10,1,@DatabaseMessage) WITH NOWAIT
+        RAISERROR(@EmptyLine,10,1) WITH NOWAIT
     END
 
     UPDATE @checkTableDbOrder
@@ -728,24 +749,24 @@ RAISERROR('%s',10,1,@EndMessage) WITH NOWAIT
 
 RAISERROR(@EmptyLine,10,1) WITH NOWAIT
 
-IF @ReturnCode <> 0
-BEGIN
-    RETURN @ReturnCode
-END
+-- IF @ReturnCode <> 0
+-- BEGIN
+--     RETURN @ReturnCode
+-- END
 
 
 -----------------------------------------------------------------
 ----------END----------------------------------------------------
 -----------------------------------------------------------------
 
-
+/*
 select *
 from tblObjects
 order by StartTime desc
 
-select *
-from CommandsRun
-order by object
+-- select *
+-- from CommandsRun
+-- order by object
 
 select * from @tmpDatabases
 select * from @tblDBs
@@ -754,7 +775,7 @@ select * from @checkTableDbOrder
 
 --select SUM(RunDuration_MS)/1000
 --from tblObjects
-
+*/
 /*
 update tblObjects
 SET LastCheckDate = DATEADD(DAY, -1, LastCheckDate)
