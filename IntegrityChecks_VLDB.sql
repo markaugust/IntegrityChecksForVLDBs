@@ -38,12 +38,14 @@ IF @Databases IS NULL
 --Add other fields like Last Run Time, Duration
 IF NOT EXISTS (SELECT 1 FROM sys.objects where object_id = OBJECT_ID(N'[dbo].[CheckTableObjects]') and type in (N'U'))
 CREATE TABLE dbo.CheckTableObjects(
-    [database_name] nvarchar(128),
+    ID int IDENTITY,
     [dbid] int,
+    [database_name] nvarchar(128),
     [dbtype] nvarchar(max),
-    [object_id] int,
-    [name] sysname,
+    [schema_id] int,
     [schema] sysname,
+    [object_id] int,
+    [object_name] sysname,
     [type] CHAR(2),
     [type_desc] nvarchar(60),
     [used_page_count] bigint,
@@ -86,7 +88,8 @@ DECLARE @tblObj TABLE (
     [dbid] int,
     [dbtype] nvarchar(max),
     [object_id] int,
-    [name] sysname,
+    [object_name] sysname,
+    [schema_id] int,
     [schema] sysname,
     [type] CHAR(2),
     [type_desc] NVARCHAR(60),
@@ -420,18 +423,18 @@ BEGIN
 
     --This query is derived and taken from the MS Tiger Scripts
     --This is where you would adjust what tables you want to select and what information to pull
-    SET @sqlcmd = 'SELECT ''' + @dbname + ''' as database_name, ' + CAST(@dbid as varchar) + ' as dbid, ''' + @dbtype + ''' as dbtype, 
-    so.[object_id], so.[name], ss.name, so.[type], so.type_desc, SUM(sps.used_page_count) AS used_page_count
-    FROM [' + @dbname + '].sys.objects so
-    INNER JOIN [' + @dbname + '].sys.dm_db_partition_stats sps ON so.[object_id] = sps.[object_id]
-    INNER JOIN [' + @dbname + '].sys.indexes si ON so.[object_id] = si.[object_id]
-    INNER JOIN [' + @dbname + '].sys.schemas ss ON so.[schema_id] = ss.[schema_id]
-    LEFT JOIN [' + @dbname + '].sys.tables st ON so.[object_id] = st.[object_id]
+    SET @sqlcmd = 'USE ' + QUOTENAME(@dbname) + ' SELECT DB_ID() as dbid, DB_NAME() as database_name, ''' + @dbtype + ''' as dbtype, 
+    ss.[schema_id], ss.[name] as [schema], so.[object_id], so.[name] as object_name, so.[type], so.type_desc, SUM(sps.used_page_count) AS used_page_count
+    FROM sys.objects so
+    INNER JOIN sys.dm_db_partition_stats sps ON so.[object_id] = sps.[object_id]
+    INNER JOIN sys.indexes si ON so.[object_id] = si.[object_id]
+    INNER JOIN sys.schemas ss ON so.[schema_id] = ss.[schema_id]
+    LEFT JOIN sys.tables st ON so.[object_id] = st.[object_id]
     WHERE so.[type] IN (''S'', ''U'', ''V'')'
     + CASE WHEN @Version >= 12 THEN ' AND (st.is_memory_optimized = 0 OR st.is_memory_optimized IS NULL)' ELSE '' END
-    + 'GROUP BY so.[object_id], so.[name], ss.name, so.[type], so.type_desc'
+    + 'GROUP BY so.[object_id], so.[name], ss.name, ss.[schema_id], so.[type], so.type_desc'
 
-    INSERT INTO @tblObj
+    INSERT INTO @tblObj (dbid, database_name, dbtype, schema_id, [schema], object_id, object_name, type, type_desc, used_page_count)
     EXEC sp_executesql @sqlcmd
 
     --update loop counter
@@ -447,7 +450,7 @@ END
 --when found in persistent table but not in source, then delete from persistent table
 MERGE master.dbo.CheckTableObjects as [Target]
 USING (SELECT * FROM @tblObj) as [Source]
-ON (Target.database_name = Source.database_name AND Target.[schema] = Source.[schema] AND Target.name = Source.name)
+ON (Target.database_name = Source.database_name AND Target.[schema] = Source.[schema] AND Target.object_name = Source.object_name)
 WHEN MATCHED /*AND Target.used_page_count <> source.used_page_count */ THEN
     UPDATE SET Target.used_page_count = source.used_page_count, Target.Active = 1
 WHEN NOT MATCHED BY TARGET THEN
@@ -455,7 +458,8 @@ WHEN NOT MATCHED BY TARGET THEN
       ,[dbid]
       ,[dbtype]
       ,[object_id]
-      ,[name]
+      ,[object_name]
+      ,[schema_id]
       ,[schema]
       ,[type]
       ,[type_desc]
@@ -465,7 +469,8 @@ WHEN NOT MATCHED BY TARGET THEN
       ,Source.[dbid]
       ,Source.[dbtype]
       ,Source.[object_id]
-      ,Source.[name]
+      ,Source.[object_name]
+      ,Source.[schema_id]
       ,Source.[schema]
       ,Source.[type]
       ,Source.[type_desc]
@@ -642,7 +647,7 @@ BEGIN
 
         SELECT TOP 1
             @schemaname = [schema],
-            @tablename = [name],
+            @tablename = [object_name],
             @avgRun = [AvgRunDuration_MS],
             @previousRunDate = [StartTime],
             @prevousRunDuration_MS = [RunDuration_MS],
@@ -711,7 +716,7 @@ BEGIN
         , EndTime = @cmdEndTime
         , [RunDuration_MS] = @newRunDuration
         , [NumberOfExecutions] = @newExecutionCount
-        WHERE @dbname = [database_name] AND @schemaname = [schema] AND @tablename = [name]
+        WHERE @dbname = [database_name] AND @schemaname = [schema] AND @tablename = [object_name]
 
     END
 
