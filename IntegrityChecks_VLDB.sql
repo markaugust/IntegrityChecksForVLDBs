@@ -32,12 +32,12 @@ DECLARE
 IF @Databases IS NULL
     SET @Databases = 'ALL_DATABASES'
 
---DROP TABLE dbo.tblObjects
+--DROP TABLE dbo.CheckTableObjects
 
 --Create persistant table to hold information
 --Add other fields like Last Run Time, Duration
-IF NOT EXISTS (SELECT 1 FROM sys.objects where object_id = OBJECT_ID(N'[dbo].[tblObjects]') and type in (N'U'))
-CREATE TABLE dbo.tblObjects(
+IF NOT EXISTS (SELECT 1 FROM sys.objects where object_id = OBJECT_ID(N'[dbo].[CheckTableObjects]') and type in (N'U'))
+CREATE TABLE dbo.CheckTableObjects(
     [database_name] nvarchar(128),
     [dbid] int,
     [dbtype] nvarchar(max),
@@ -445,7 +445,7 @@ END
 --When Match and page count is different, update page count in persistent table and set active flag
 --when not found in persistent table, insert
 --when found in persistent table but not in source, then delete from persistent table
-MERGE master.dbo.tblObjects as [Target]
+MERGE master.dbo.CheckTableObjects as [Target]
 USING (SELECT * FROM @tblObj) as [Source]
 ON (Target.database_name = Source.database_name AND Target.[schema] = Source.[schema] AND Target.name = Source.name)
 WHEN MATCHED /*AND Target.used_page_count <> source.used_page_count */ THEN
@@ -574,7 +574,7 @@ END
 
 INSERT INTO @checkTableDbOrder ([name], [dbid], [dbtype], [MinLastCheckDate], [isDone])
 SELECT [database_name], [dbid], [dbtype], min([LastCheckDate]), 0
-FROM tblObjects
+FROM CheckTableObjects
 WHERE Active = 1
 GROUP BY [database_name], [dbid], [dbtype]
 
@@ -592,7 +592,7 @@ BEGIN
     END
 
     --if the number of new tables (execution count = 0) is greater than existing (execution count > 0)
-    IF (SELECT count([database_name]) from tblObjects WHERE @dbname = [database_name] and NumberOfExecutions = 0) > (SELECT count([database_name]) from tblObjects WHERE @dbname = [database_name] and NumberOfExecutions > 0)
+    IF (SELECT count([database_name]) from CheckTableObjects WHERE @dbname = [database_name] and NumberOfExecutions = 0) > (SELECT count([database_name]) from CheckTableObjects WHERE @dbname = [database_name] and NumberOfExecutions > 0)
         SET @InitialRunCheck = 1
 
 
@@ -650,10 +650,10 @@ BEGIN
             @cmdStartTime = [StartTime],
             @cmdEndTime = [EndTime],
             @lastCheckDate = [LastCheckDate]
-        FROM tblObjects
+        FROM CheckTableObjects
         WHERE @dbname = [database_name]
         AND Active = 1
-        AND LastCheckDate = (SELECT MIN(LastCheckDate) FROM tblObjects WHERE [database_name] = @dbname)  --Makes sure it's the oldest entry for that database
+        AND LastCheckDate = (SELECT MIN(LastCheckDate) FROM CheckTableObjects WHERE [database_name] = @dbname)  --Makes sure it's the oldest entry for that database
         AND LastCheckDate <> CAST(@JobStartTime as date)  --makes sure it's not the same day, as we don't need to run it again
         ORDER BY
         CASE WHEN @OrderBySmallest = 1 THEN used_page_count END ASC,
@@ -700,8 +700,8 @@ BEGIN
             SET @command = 'Command Executed: ' + @sqlcmd
         END
 
-        --Update tblObjects with new information
-        UPDATE dbo.tblObjects
+        --Update CheckTableObjects with new information
+        UPDATE dbo.CheckTableObjects
         SET [LastCheckDate] = @lastCheckDate
         , [Command] = @command
         , [AvgRunDuration_MS] = @avgRun
@@ -761,7 +761,7 @@ RAISERROR(@EmptyLine,10,1) WITH NOWAIT
 
 /*
 select *
-from tblObjects
+from CheckTableObjects
 order by StartTime desc
 
 -- select *
@@ -774,9 +774,9 @@ select * from @tblObj
 select * from @checkTableDbOrder
 
 --select SUM(RunDuration_MS)/1000
---from tblObjects
+--from CheckTableObjects
 */
 /*
-update tblObjects
+update CheckTableObjects
 SET LastCheckDate = DATEADD(DAY, -1, LastCheckDate)
 */
