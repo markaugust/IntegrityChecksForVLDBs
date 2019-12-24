@@ -652,7 +652,7 @@ BEGIN
             @previousRunDate = [StartTime],
             @prevousRunDuration_MS = [RunDuration_MS],
             @origExecutionCount = [NumberOfExecutions],
-            --@cmdStartTime = [StartTime],
+            @cmdStartTime = [StartTime],
             @cmdEndTime = [EndTime],
             @lastCheckDate = [LastCheckDate]
         FROM CheckTableObjects
@@ -670,16 +670,14 @@ BEGIN
             BREAK
         END
 
-        SET @cmdStartTime = GETDATE()
-
         --If average run time is longer than remaining time + one minute to give a little overhead
-        IF @TimeLimit IS NOT NULL AND DATEADD(MS, @avgRun, @cmdStartTime) > DATEADD(MI, 1, @JobEndTime)
+        IF @TimeLimit IS NOT NULL AND DATEADD(MS, @avgRun, GETDATE()) > DATEADD(MI, 1, @JobEndTime)
         BEGIN
-            SET @command = 'Skipped due to TimeLimit Constraint: ' + CONVERT(nvarchar, DATEADD(MS, @avgRun, @cmdStartTime), 121) + ' is greater than ' + CONVERT(nvarchar, DATEADD(MI, 1, @JobEndTime), 121)
+            SET @command = 'Skipped due to TimeLimit Constraint: ' + CONVERT(nvarchar, DATEADD(MS, @avgRun, GETDATE()), 121) + ' is greater than ' + CONVERT(nvarchar, DATEADD(MI, 1, @JobEndTime), 121)
         END
         ELSE
         BEGIN
-            --SET @cmdStartTime = GETDATE()
+            SET @cmdStartTime = GETDATE()
             SET @sqlcmd = 'USE [' + @checkDbName + ']; DBCC CHECKTABLE (''' + QUOTENAME(@schemaname) + '.' + QUOTENAME(@tablename) + ''') WITH NO_INFOMSGS, ALL_ERRORMSGS'
             IF @PhysicalOnly = 'N' SET @sqlcmd = @sqlcmd + ', DATA_PURITY'
             IF @PhysicalOnly = 'Y' SET @sqlcmd = @sqlcmd + ', PHYSICAL_ONLY'
