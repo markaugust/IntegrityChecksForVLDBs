@@ -423,6 +423,7 @@ BEGIN
 
     --This query is derived and taken from the MS Tiger Scripts
     --This is where you would adjust what tables you want to select and what information to pull
+    --Removed System Type (S) because Ola doesn't check those either
     SET @sqlcmd = 'USE ' + QUOTENAME(@dbname) + ' SELECT DB_ID() as dbid, DB_NAME() as database_name, ''' + @dbtype + ''' as dbtype, 
     ss.[schema_id], ss.[name] as [schema], so.[object_id], so.[name] as object_name, so.[type], so.type_desc, SUM(sps.used_page_count) AS used_page_count
     FROM sys.objects so
@@ -430,7 +431,7 @@ BEGIN
     INNER JOIN sys.indexes si ON so.[object_id] = si.[object_id]
     INNER JOIN sys.schemas ss ON so.[schema_id] = ss.[schema_id]
     LEFT JOIN sys.tables st ON so.[object_id] = st.[object_id]
-    WHERE so.[type] IN (''S'', ''U'', ''V'')'
+    WHERE so.[type] IN (''U'', ''V'')'
     + CASE WHEN @Version >= 12 THEN ' AND (st.is_memory_optimized = 0 OR st.is_memory_optimized IS NULL)' ELSE '' END
     + 'GROUP BY so.[object_id], so.[name], ss.name, ss.[schema_id], so.[type], so.type_desc'
 
