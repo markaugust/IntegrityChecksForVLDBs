@@ -514,7 +514,7 @@ BEGIN
     SET @sqlcmd = 'IF EXISTS (SELECT 1 from ' + QUOTENAME(@dbname) + '.sys.filegroups where type = ''FX'') BEGIN SET @currentHasMemOptFG = 1 END ELSE BEGIN SET @currentHasMemOptFG = 0 END'
     exec sp_executesql @statement = @sqlcmd, @params = N'@currentHasMemOptFG bit OUTPUT', @currentHasMemOptFG = @hasMemOptFG output
     --if it's not MemOptFG and not a System DB, Create manual snapshot
-    IF NOT (@hasMemOptFG = 1 OR @dbtype = 'S')
+    IF NOT (@hasMemOptFG = 1 OR @dbtype = 'S' OR @SnapshotPath IS NULL)
     BEGIN
         --Build and execute create snapshot statement
         SET @snapName = @dbname + '_CHKALOCCAT_snapshot_' + CONVERT(nvarchar, @JobStartTime, 112)
@@ -611,7 +611,7 @@ BEGIN
     SET @sqlcmd = 'IF EXISTS (SELECT 1 from ' + QUOTENAME(@dbname) + '.sys.filegroups where type = ''FX'') BEGIN SET @currentHasMemOptFG = 1 END ELSE BEGIN SET @currentHasMemOptFG = 0 END'
     exec sp_executesql @statement = @sqlcmd, @params = N'@currentHasMemOptFG bit OUTPUT', @currentHasMemOptFG = @hasMemOptFG output
     --if it's not MemOptFG and not a System DB, Create manual snapshot
-    IF NOT (@hasMemOptFG = 1 OR @dbtype = 'S')
+    IF NOT (@hasMemOptFG = 1 OR @dbtype = 'S' OR @SnapshotPath IS NULL)
     BEGIN
         --Build and execute create snapshot statement
         SET @snapName = @dbname + '_CHKTABLE_snapshot_' + CONVERT(nvarchar, @JobStartTime, 112)
