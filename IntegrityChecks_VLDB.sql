@@ -2,6 +2,8 @@
 
 Uncomment return code at end when creating stored proc
 
+Currently requires an outdated version of Ola.  See the 
+
 1. Create Table for holding info
 2. Create Database Snapshot for each database as it loops through
 3. DBCC CHECKALLOC on all databases
@@ -22,7 +24,7 @@ DECLARE
     @PhysicalOnly nvarchar(max) = 'N',
     @MaxDOP int = NULL,
     @TimeLimit int = NULL,
-    @SnapshotPath nvarchar(300) = NULL,
+    @SnapshotPath nvarchar(300) = NULL,  --Value of 'DEFAULT' will put the manual snapshot in same dir as data files
     @LogToTable nvarchar(max) = 'Y',
     @Execute nvarchar(max) = 'Y'
 
@@ -520,7 +522,7 @@ BEGIN
         SET @snapName = @dbname + '_CHKALOCCAT_snapshot_' + CONVERT(nvarchar, @JobStartTime, 112)
         SET @sqlcmd = 'CREATE DATABASE ' + QUOTENAME(@snapName) + ' ON '
         SELECT @sqlcmd = @sqlcmd + '(Name = ' + QUOTENAME(name) + ', Filename = '''
-            + CASE WHEN @SnapshotPath IS NULL THEN physical_name ELSE @SnapshotPath + '\' + name END
+            + CASE WHEN @SnapshotPath = 'DEFAULT' THEN physical_name ELSE @SnapshotPath + '\' + name END
             + '_CHKALOCCAT_snapshot_' + CONVERT(nvarchar, @JobStartTime, 112) + '''),'
         FROM sys.master_files WHERE database_id = @dbid AND type = 0
         SET @sqlcmd = LEFT(@sqlcmd, LEN(@sqlcmd) - 1)
@@ -617,7 +619,7 @@ BEGIN
         SET @snapName = @dbname + '_CHKTABLE_snapshot_' + CONVERT(nvarchar, @JobStartTime, 112)
         SET @sqlcmd = 'CREATE DATABASE ' + QUOTENAME(@snapName) + ' ON '
         SELECT @sqlcmd = @sqlcmd + '(Name = ' + QUOTENAME(name) + ', Filename = '''
-            + CASE WHEN @SnapshotPath IS NULL THEN physical_name ELSE @SnapshotPath + '\' + name END
+            + CASE WHEN @SnapshotPath = 'DEFAULT' THEN physical_name ELSE @SnapshotPath + '\' + name END
             + '_CHKTABLE_snapshot_' + CONVERT(nvarchar, @JobStartTime, 112) + '''),'
         FROM sys.master_files WHERE database_id = @dbid AND type = 0
         SET @sqlcmd = LEFT(@sqlcmd, LEN(@sqlcmd) - 1)
