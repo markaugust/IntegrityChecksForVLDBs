@@ -2,7 +2,7 @@
 
 Uncomment return code at end when creating stored proc
 
-Currently requires an outdated version of Ola.  See the 
+Currently requires an outdated version of Ola.  See the sql-server-maintenance-solution-... folder
 
 1. Create Table for holding info
 2. Create Database Snapshot for each database as it loops through
